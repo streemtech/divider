@@ -22,7 +22,6 @@ type Divider struct {
 	metaKey     string
 	affinity    divider.Affinity
 	mux         *sync.Mutex
-	watcher     Watcher
 	startChan   chan string
 	stopChan    chan string
 	done        context.Context
@@ -30,26 +29,24 @@ type Divider struct {
 	uuid        string
 	currentKeys map[string]bool
 	informer    divider.Informer
+	timeout     int // number of seconds to time out at.
 }
-
-//Watcher is used to determine what type of redis key is being watched.
-type Watcher int
-
-const (
-	//PubSub is used for watching PubSubs. PubSubs never require ConfirmStopProcessing. The sub has just been closed.
-	PubSub Watcher = iota
-	//String is used for string key/values. after done processing, when ConfirmStopProcessing is called for string types, the key is removed from the list.
-	String
-)
 
 //NewDivider returns a Divider using the Go-Redis library as a backend.
 //The keys beginning in <masterKey>/__meta are used to keep track of the different metainformation to
-func NewDivider(redis *redis.Client, masterKey string, watcher Watcher, informer divider.Informer) *Divider {
+func NewDivider(redis *redis.Client, masterKey string, informer divider.Informer, timeout int) *Divider {
 	var i divider.Informer
 	if informer == nil {
 		i = divider.DefaultLogger{}
 	} else {
 		i = informer
+	}
+	var t int
+
+	if timeout <= 0 {
+		t = 10
+	} else {
+		t = timeout
 	}
 	return &Divider{
 		redis:     redis,
@@ -59,9 +56,9 @@ func NewDivider(redis *redis.Client, masterKey string, watcher Watcher, informer
 		mux:       &sync.Mutex{},
 		startChan: make(chan string),
 		stopChan:  make(chan string),
-		watcher:   watcher,
 		uuid:      uuid.New().String(),
 		informer:  i,
+		timeout:   t,
 	}
 }
 
@@ -237,7 +234,6 @@ func (r *Divider) setAffinity(Affinity divider.Affinity) {
 	keys := []string{key}
 	args := []string{r.uuid, strconv.Itoa(int(Affinity))}
 	res, err := setAffinityScript.Run(r.done, r.redis, keys, args).Result()
-	//TODO0 set affinity remotely.
 	if err != nil && err.Error() != "redis: nil" {
 		r.informer.Errorf(err.Error())
 		return
@@ -246,10 +242,9 @@ func (r *Divider) setAffinity(Affinity divider.Affinity) {
 }
 
 func (r *Divider) sendStopProcessing(key string) {
-	//TODO0 send to redis that this node is no longer processing this particular key.
 	r.cleanup()
-	keys := []string{}
-	args := []string{}
+	keys := []string{r.metaKey + ":work"}
+	args := []string{key}
 	res, err := sendStopProcessingScript.Run(r.done, r.redis, keys, args).Result()
 	if err != nil && err.Error() != "redis: nil" {
 		r.informer.Errorf(err.Error())
@@ -259,7 +254,6 @@ func (r *Divider) sendStopProcessing(key string) {
 }
 
 func (r *Divider) getAssignedProcessingArray() []string {
-	//TODO0 make the call to redis, look for any lost keys, assign them, and return the list of keys that are assigned to this node.
 	//This is where most of the `WORK` is done.
 	r.cleanup()
 	// --KEY1 __meta:work
@@ -272,9 +266,9 @@ func (r *Divider) getAssignedProcessingArray() []string {
 		r.informer.Errorf(err.Error())
 		return []string{}
 	}
-	r.informer.Infof("RESPONSE: %v, %T", res, res)
-	//return format(res)
-	return []string{}
+	//r.informer.Infof("RESPONSE: %v, %T", res, res)
+	return format(res)
+	//return []string{}
 }
 
 func format(in interface{}) (out []string) {
@@ -344,7 +338,7 @@ func (r *Divider) cleanup() {
 	affinity := r.metaKey + ":affinity"
 	workKey := r.metaKey + ":work"
 	keys := []string{timeoutKey, affinity, workKey}
-	args := []string{r.uuid, "10"}
+	args := []string{r.uuid, strconv.Itoa(r.timeout)}
 	_, err := cleanupScript.Run(r.done, r.redis, keys, args).Result()
 	if err != nil && err.Error() != "redis: nil" {
 		r.informer.Errorf(err.Error())
@@ -364,20 +358,11 @@ return setVal
 var sendStopProcessingScript = redis.NewScript(`
 --ARG1 The Work ID
 --KEY1 __meta:work
---KEY2 __meta:asign:<UUID>
 
 redis.call('hdel' KEYS[1], ARGV[1]) -- delete from the list of work-node, the asigned work 
-redis.call('srem' KEYS[2], ARGV[1]) -- delete from the node's list of asigned that particular work.
 `)
 
 var getAssignedProcessingScript = redis.NewScript(`
---*********FUNCTIONS*******************
-
-
---***********CODE *********************
-
-
-
 --ARG1 The lookup key.
 --ARG2 The node key.
 
