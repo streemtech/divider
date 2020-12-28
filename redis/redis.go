@@ -207,10 +207,12 @@ func (r *Divider) compareKeys() {
 
 	for key := range toAdd {
 		r.startChan <- key
+		r.currentKeys[key] = true
 	}
 
 	for key := range toRemove {
 		r.stopChan <- key
+		delete(r.currentKeys, key)
 	}
 }
 
@@ -362,6 +364,7 @@ var sendStopProcessingScript = redis.NewScript(`
 redis.call('hdel' KEYS[1], ARGV[1]) -- delete from the list of work-node, the asigned work 
 `)
 
+//TODO1 need some way to remove a key from the list of work.
 var getAssignedProcessingScript = redis.NewScript(`
 --ARG1 The lookup key.
 --ARG2 The node key.
@@ -385,6 +388,7 @@ for _,value in ipairs(openChannels) do
 		--get the node to asign this one to. 
 	end
 end
+
 
 --return toAssigns
 if ( table.getn(toAssigns) > 0) then

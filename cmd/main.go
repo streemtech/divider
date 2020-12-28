@@ -14,7 +14,7 @@ import (
 
 func main() {
 	fmt.Println("HI")
-	siulators()
+	//siulators()
 	makeWatcher(true)
 }
 
@@ -57,9 +57,9 @@ func makeWatcher(print bool) {
 		for {
 			time.Sleep(time.Second)
 			now := time.Now()
-			divider.GetAssignedProcessingArray()
+			vals := divider.GetAssignedProcessingArray()
 			dur := now.Sub(time.Now())
-			fmt.Println(dur.String())
+			fmt.Printf("%s %v\n", dur.String(), vals)
 		}
 	} else {
 		for {
