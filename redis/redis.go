@@ -3,7 +3,6 @@ package redis
 import (
 	"context"
 	"math"
-	"strconv"
 	"sync"
 	"time"
 
@@ -230,21 +229,10 @@ func (r *Divider) watchForKeys() {
 
 //Internal affinity setting.
 func (r *Divider) setAffinity(Affinity divider.Affinity) {
-	r.cleanup()
 	r.affinity = Affinity
-	key := r.metaKey + ":affinity"
-	keys := []string{key}
-	args := []string{r.uuid, strconv.Itoa(int(Affinity))}
-	res, err := setAffinityScript.Run(r.done, r.redis, keys, args).Result()
-	if err != nil && err.Error() != "redis: nil" {
-		r.informer.Errorf(err.Error())
-		return
-	}
-	r.informer.Infof("Redis Divider Affinity updated to %v (%T)", res, res)
 }
 
 func (r *Divider) sendStopProcessing(key string) {
-	r.cleanup()
 	keys := []string{r.metaKey + ":work"}
 	args := []string{key}
 	res, err := sendStopProcessingScript.Run(r.done, r.redis, keys, args).Result()
@@ -256,13 +244,18 @@ func (r *Divider) sendStopProcessing(key string) {
 }
 
 func (r *Divider) getAssignedProcessingArray() []string {
-	//This is where most of the `WORK` is done.
-	r.cleanup()
-	// --KEY1 __meta:work
-	// --KEY2 __meta:assign:<UUID>
-	// --KEY2 __meta:affinity
-	keys := []string{r.metaKey + ":work", r.metaKey + ":assign:" + r.uuid, r.metaKey + ":affinity"}
-	args := []string{r.masterKey + ":*", r.uuid}
+	/*
+		-- main.lua is responsible for the cleanup and running of this implementaiton of the divider
+		-- KEY1 is the poll meta key. (poll:__meta)
+		-- KEY2 is the poll master key (poll)
+		-- ARG1 UUID of this node
+		-- ARG2 Current Time (Unix Seconds)
+		-- ARG3 timeout time (N Seconds)
+		-- ARG4 affinity
+	*/
+
+	keys := []string{r.metaKey, r.masterKey}
+	args := []interface{}{r.uuid, time.Now().Unix(), r.timeout, int(r.affinity)}
 	res, err := getAssignedProcessingScript.Run(r.done, r.redis, keys, args).Result()
 	if err != nil && err.Error() != "redis: nil" {
 		r.informer.Errorf(err.Error())
@@ -282,81 +275,6 @@ func format(in interface{}) (out []string) {
 	return out
 }
 
-var cleanupScript = redis.NewScript(`
---KEY1 timeoutKey (where Arg1's timout is to be reset.)
---KEY2 affinity  (where all affinities are stored)
---KEY3 workKey (where all the work is assigned.)
---ARG1 uuid
---ARG2 timeout seconds
-
---update the timeout on this ticker to be the most up to date.
-redis.call('setex', KEYS[1] .. ARGV[1], tonumber(ARGV[2]), ARGV[1])
-
---check for keys without timeout. 
-local nodes = redis.call('hkeys', KEYS[2]) --get everything in affinity.
-local work = redis.call("hgetall",KEYS[3]) --get the work assignments.
-
-local workKeys = {}
-local workerNodes = {}
-
---Set the key/value lists for the work asignments.
-for i,vgetVal in ipairs(work) do
-	if (tonumber(i) % 2 == 1) then
-		table.insert(workKeys, vgetVal)
-	else
-		table.insert(workerNodes, vgetVal)
-	end
-end
-
-for key,missingNode in pairs(nodes) do
-	local nodeKey = KEYS[1] .. missingNode
-	local isThere = redis.call('exists', nodeKey)
-	--redis.log(3, "value " .. nodeKey .. " IS " .. isThere)
-
-	--if the timeout key is NO there (IE it is no longer updating)
-	if isThere == 0 then 
-
-
-		--delete from the work list.
-		redis.call('hdel', KEYS[2], missingNode) 
-
-		--for the list of work noddes (the node it was assigned to)
-		for workerIDX,workerNode in ipairs(workerNodes) do
-			--redis.log(3, "checking " .. workerNode .. " against " .. missingNode)
-			if (workerNode == missingNode) then
-				--redis.log(3, "same value.")
-				redis.call("hdel", KEYS[3], workKeys[workerIDX])
-			end
-		end
-
-	end
-end
-
-`)
-
-func (r *Divider) cleanup() {
-	timeoutKey := r.metaKey + ":timeout:"
-
-	affinity := r.metaKey + ":affinity"
-	workKey := r.metaKey + ":work"
-	keys := []string{timeoutKey, affinity, workKey}
-	args := []string{r.uuid, strconv.Itoa(r.timeout)}
-	_, err := cleanupScript.Run(r.done, r.redis, keys, args).Result()
-	if err != nil && err.Error() != "redis: nil" {
-		r.informer.Errorf(err.Error())
-		return
-	}
-	//r.informer.Infof("CLEANUP %v (%T)", res2, res2)
-
-}
-
-var setAffinityScript = redis.NewScript(`
-redis.call('hset', KEYS[1], ARGV[1], ARGV[2] )
-local setVal = redis.call('hget', KEYS[1], ARGV[1])
---redis.log(3, "set affinity " .. setVal .. " at " .. KEYS[1])
-return setVal
-`)
-
 var sendStopProcessingScript = redis.NewScript(`
 --ARG1 The Work ID
 --KEY1 __meta:work
@@ -365,96 +283,206 @@ redis.call('hdel' KEYS[1], ARGV[1]) -- delete from the list of work-node, the as
 `)
 
 //TODO1 need some way to remove a key from the list of work.
-var getAssignedProcessingScript = redis.NewScript(`
---ARG1 The lookup key.
---ARG2 The node key.
+var getAssignedProcessingScript = redis.NewScript(`-- main.lua is responsible for the cleanup and running of this implementaiton of the divider
+-- KEY1 is the poll meta key. (poll:__meta)
+-- KEY2 is the poll master key (poll)
+-- ARG1 UUID of this node
+-- ARG2 Current Time (Unix Seconds)
+-- ARG3 timeout time (N Seconds)
+-- ARG4 affinity
 
---KEY1 __meta:work
---KEY2 __meta:assign:<UUID>
---KEY3 __meta:affinity
+
+--need some way to store timeouts.
+--need some way to check what work is assigned to what node
+--
+
+--**********************************
+local metaKey = KEYS[1]
+local masterKey = KEYS[2]
+local nodeUUID = ARGV[1]
+local currentTime = ARGV[2]
+local timeout = ARGV[3]
+local deadTime = currentTime-timeout
+local nodeAffinity = ARGV[4]
 
 
--- get the channels currently open.
-local openChannels = redis.call('pubsub', 'channels', ARGV[1])
+local nodeSetKey = metaKey .. ":nodes"
+local affinityKey = metaKey .. ":affinity:affinity"
+local chanceKey = metaKey .. ":assignmentChance"
+local workKey = metaKey..":work:assigned" --work stores where the work is assigned. work:id stores what work was assigned to that key.
+local currentWorkKey = metaKey..":work:current"
+local oldWorkKey = metaKey..":work:old"
 
-local toAssigns = {}
-for _,value in ipairs(openChannels) do
-	local worker = redis.call('hget', KEYS[1], value)
+local function log() 
+	--redis.log(3, "\nmetaKey:" .. metaKey ..
+	-- "\nmasterKey: " .. masterKey ..
+	-- "\nnodeUUID: " .. nodeUUID ..
+	-- "\ncurrentTime: " .. currentTime ..
+	-- "\ntimeout: " .. timeout ..
+	-- "\ndeadTime: " .. deadTime ..
+	-- "\nnodeAffinity: " .. nodeAffinity ..
+	-- "\nnodeSetKey: " .. nodeSetKey ..
+	-- "\naffinityKey: " .. affinityKey ..
+	-- "\nchanceKey: " .. chanceKey ..
+	-- "\nworkKey: " .. workKey )
 
-	--check if I need to set add a worker to anything.
-	if (worker == false) then
-		--redis.log(3, "no worker for " .. value)
-		table.insert(toAssigns, value)
-		--get the node to asign this one to. 
-	end
 end
 
 
---return toAssigns
-if ( table.getn(toAssigns) > 0) then
-	local affKeys = {}
-	local affVals = {}
-	local total = 0
-	local aff = redis.call("hgetall",KEYS[3])
 
 
-	
-	--Set the key/value lists. 
-	for i,value in ipairs(aff) do
-		
-		if (tonumber(i) % 2 == 1) then
-			table.insert(affKeys, value)
+--set the work to having that node for it;s worker, and add the work to the set of work that this node is working on.
+local function assignWorkToNode(workId, NodeId) 
+	--redis.log(3, "asigning work To Node: " .. workId .." Node: ".. NodeId)
+	redis.call("hset", workKey, workId, NodeId) --set what node is working on this work
+	redis.call("sadd", workKey..":"..NodeId, workId) --set that this node has this work. 
+end
+
+local function assignWork (workId)
+	--redis.log(3, "Asigning Work: ".. workId)
+	local node = redis.call("ZRANGEBYSCORE", chanceKey, math.random(),2,  "LIMIT", 0 ,1)
+	assignWorkToNode(workId, node[1])
+end
+
+local function deleteWork (workId)
+	--redis.log(3, "deleting work: ".. workId)
+	local worker = redis.call("hget", workKey, workId) --get what node is working on this work
+	redis.call("hdel", workKey, workId)
+	redis.call("srem", workKey..":"..worker)
+
+end
+
+--update the list of affinities's chances in the key. wont update if not needed.
+local function updateAffinityChances()
+	--redis.log(3, "updating Affinity.")
+
+
+	local sum = 0;
+	local affinityVals = redis.call("hvals", affinityKey)
+	for _,val in ipairs(affinityVals) do
+
+		sum = sum  + val
+	end
+
+
+	redis.call("del", chanceKey)
+	local affinities = redis.call("hgetall", affinityKey)
+
+	local score = 0
+	local key = ""
+	local weight = 0
+	for i,val in ipairs(affinities) do
+
+		if (i % 2 == 1) then
+			key = val
 		else
-			total = total + tonumber(value)
-			table.insert(affVals, value)
+			weight = weight + val/sum
+			redis.call("zadd", chanceKey, weight, key)
 		end
 	end
 
+	redis.call("zadd", chanceKey, 1, key)
 
-
-	--loop through and, for each one that needs to be assigned, assign it to a value based on the total 
-	for _,work in ipairs(toAssigns) do
-		local marker = math.random(0,total)
-		local sum = 0
-
-		for i,val in ipairs(affVals) do
-			sum = sum + tonumber(val)
-			if marker < sum then
-				--Add to the key at that value.
-				--redis.log(3, "assigning woker " .. affKeys[i] .. " to " .. work)
-				redis.call('hmset', KEYS[1] , work, affKeys[i] )
-				break
-			end
-		end
-	end
 end
 
-local work = redis.call("hgetall",KEYS[1]) --get the work assignments.
 
-local workKeys = {}
-local workerNodes = {}
 
---Set the key/value lists for the work asignments.
-for i,vgetVal in ipairs(work) do
-	if (tonumber(i) % 2 == 1) then
-		table.insert(workKeys, vgetVal)
+
+--update the affinity for a specific node, and update the sum affinity.
+local function updateAffinity (id, affinity)
+	--redis.log(3, "updating affinity " .. id .." to ".. affinity)
+	local exists = redis.call("hexists", affinityKey, id)
+
+	if exists == 1 then
+		local current = redis.call("hget", affinityKey, id)
+		redis.call("hset", affinityKey, id, affinity)
 	else
-		table.insert(workerNodes, vgetVal)
+		redis.call("hset", affinityKey, id, affinity)
 	end
 end
 
-local doneWork = {}
+--remove a node from the different lists, removing its affinity. also remove work not assigned from the list.
+local function deleteNode (id)
+	--redis.log(3, "deleting node " .. id )
+	redis.call("zrem", nodeSetKey, id )
+	redis.call("hdel", affinityKey, id)
 
-for i,node in ipairs(workerNodes) do
-	--redis.log(3, "checking " .. node .. " Vs " .. ARGV[2])
-	if (node == ARGV[2]) then
-		table.insert(doneWork, workKeys[i])
+	local nodeWorkKey = workKey..":"..id
+	--go through the work that this node was assigned and remove it.
+	local assignedWork = redis.call("SMEMBERS", nodeWorkKey)
+	for _,work in ipairs(assignedWork) do
+		redis.call("hdel", workKey, work)
+	end
+	redis.call("del", nodeWorkKey)
+end
+
+--update values to make sure that this node is recorded.
+local function update()
+	--redis.log(3,"update")
+	--Update set of live nodes to contain self, with current time as the score.
+	redis.call('zadd', nodeSetKey,  currentTime, nodeUUID)
+	--update the affinity.
+	updateAffinity(nodeUUID, nodeAffinity)
+end
+
+--clean up all old nodes, if they have been dropped.
+local function cleanup()
+	--redis.log(3,"cleanup")
+	local deadNodes = redis.call('ZRANGEBYSCORE', nodeSetKey, 0, deadTime)
+	--Set the key/value lists for the work asignments.
+	for _,deadNode in ipairs(deadNodes) do
+		deleteNode(deadNode)
 	end
 end
 
---TODO convert this to actually do a lookup instead of 
-return doneWork
-`)
+
+--assign work to nodes.
+local function assign()
+	--redis.log(3, "asigning.")
+	
+	--get the current work
+	local work = redis.call("pubsub", "channels", masterKey..":*")
+	--get the previous work
+	local oldWork = redis.call("hkeys", workKey)
+
+	--save the current work to currentWorkKey
+	redis.call("del", currentWorkKey)
+	if #work >0 then
+		redis.call("sadd", currentWorkKey, unpack(work))
+	else
+		--redis.log(3, "no work to assign")
+	end
+	--savePreviousWork to previousWorkKey
+	redis.call("del", oldWorkKey)
+	if #oldWork > 0 then
+		redis.call("sadd", oldWorkKey, unpack(oldWork))
+	else
+		--redis.log(3, "no old work to assign")
+	end
+	--get the difference between the two works
+	local toDelete = redis.call("sdiff", oldWorkKey, currentWorkKey)
+	local toAdd = redis.call("sdiff", currentWorkKey, oldWorkKey)
+	
+	for _,work in ipairs(toDelete) do
+		deleteWork(work)
+	end
+
+	if #toAdd >0 then 
+		updateAffinityChances()
+		for _,work in ipairs(toAdd) do
+			assignWork(work)
+		end
+	end
+end
+
+
+log()
+
+update()
+cleanup()
+assign()
+
+return redis.call("smembers", workKey..":"..nodeUUID)`)
 
 /*
 

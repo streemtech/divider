@@ -22,32 +22,45 @@ local nodeAffinity = ARGV[4]
 
 
 local nodeSetKey = metaKey .. ":nodes"
-local affinityKey = metaKey .. ":affinity"
-local affinitySumKey = metaKey .. ":affinity:sum"
-local lastAffinitySumKey = metaKey .. ":affinity:sum:last" -- the store for the last affinity when checking to load new values. Compare to affinty to allow for only updating affinity if I need to. 
+local affinityKey = metaKey .. ":affinity:affinity"
 local chanceKey = metaKey .. ":assignmentChance"
-local workKey = metaKey.."work" --work stores where the work is assigned. work:id stores what work was assigned to that key.
+local workKey = metaKey..":work:assigned" --work stores where the work is assigned. work:id stores what work was assigned to that key.
+local currentWorkKey = metaKey..":work:current"
+local oldWorkKey = metaKey..":work:old"
 
+local function log() 
+	--redis.log(3, "\nmetaKey:" .. metaKey ..
+	-- "\nmasterKey: " .. masterKey ..
+	-- "\nnodeUUID: " .. nodeUUID ..
+	-- "\ncurrentTime: " .. currentTime ..
+	-- "\ntimeout: " .. timeout ..
+	-- "\ndeadTime: " .. deadTime ..
+	-- "\nnodeAffinity: " .. nodeAffinity ..
+	-- "\nnodeSetKey: " .. nodeSetKey ..
+	-- "\naffinityKey: " .. affinityKey ..
+	-- "\nchanceKey: " .. chanceKey ..
+	-- "\nworkKey: " .. workKey )
 
+end
 
 
 
 
 --set the work to having that node for it;s worker, and add the work to the set of work that this node is working on.
-function assignWorkToNode(workId, NodeId) 
-	redis.log(3, "asigning work To Node: " .. workId .." Node: ".. NodeId)
-	redis.call("hadd", workKey, workId, NodeId) --set what node is working on this work
-	redis.call("sadd", workKey..":"..NodeId) --set that this node has this work. 
+local function assignWorkToNode(workId, NodeId) 
+	--redis.log(3, "asigning work To Node: " .. workId .." Node: ".. NodeId)
+	redis.call("hset", workKey, workId, NodeId) --set what node is working on this work
+	redis.call("sadd", workKey..":"..NodeId, workId) --set that this node has this work. 
 end
 
-function assignWork (workId)
-	redis.log(3, "Asigning Work: ".. workId)
-	local node = redis.call("", chanceKey, math.rand(),2,  "LIMIT", 0 ,1)
+local function assignWork (workId)
+	--redis.log(3, "Asigning Work: ".. workId)
+	local node = redis.call("ZRANGEBYSCORE", chanceKey, math.random(),2,  "LIMIT", 0 ,1)
 	assignWorkToNode(workId, node[1])
 end
 
-function deleteWork (workId)
-	redis.log(3, "deleting work: ".. workId)
+local function deleteWork (workId)
+	--redis.log(3, "deleting work: ".. workId)
 	local worker = redis.call("hget", workKey, workId) --get what node is working on this work
 	redis.call("hdel", workKey, workId)
 	redis.call("srem", workKey..":"..worker)
@@ -55,15 +68,19 @@ function deleteWork (workId)
 end
 
 --update the list of affinities's chances in the key. wont update if not needed.
-function updateAffinityChances()
-	redis.log(3, "updating Affinity.")
+local function updateAffinityChances()
+	--redis.log(3, "updating Affinity.")
 
-	local sum = redis.call("get",affinitySumKey)
-	local lastSum = redis.call("get", lastAffinitySumKey)
-	if sum == lastSum then
-		return
+
+	local sum = 0;
+	local affinityVals = redis.call("hvals", affinityKey)
+	for _,val in ipairs(affinityVals) do
+
+		sum = sum  + val
 	end
 
+
+	redis.call("del", chanceKey)
 	local affinities = redis.call("hgetall", affinityKey)
 
 	local score = 0
@@ -74,13 +91,12 @@ function updateAffinityChances()
 		if (i % 2 == 1) then
 			key = val
 		else
-			weight = val
-			redis.call("zset", chanceKey, key, score/weight)
+			weight = weight + val/sum
+			redis.call("zadd", chanceKey, weight, key)
 		end
 	end
 
-	redis.call("zset", chanceKey, key, 1)
-	redis.call("set",lastAffinitySumKey, sum)
+	redis.call("zadd", chanceKey, 1, key)
 
 end
 
@@ -88,84 +104,97 @@ end
 
 
 --update the affinity for a specific node, and update the sum affinity.
-function updateAffinity (id, affinity)
-	redis.log(3, "updating affinity " .. id .." to ".. affinity)
+local function updateAffinity (id, affinity)
+	--redis.log(3, "updating affinity " .. id .." to ".. affinity)
 	local exists = redis.call("hexists", affinityKey, id)
 
 	if exists == 1 then
 		local current = redis.call("hget", affinityKey, id)
 		redis.call("hset", affinityKey, id, affinity)
-		redis.call("INCRBY", affinitySumKey, affinity-current)
 	else
 		redis.call("hset", affinityKey, id, affinity)
-		redis.call("INCRBY", affinitySumKey, affinity)
 	end
 end
 
 --remove a node from the different lists, removing its affinity. also remove work not assigned from the list.
-function deleteNode (id)
-	redis.log(3, "deleting node " .. id )
-	updateAffinity(id, 0)
+local function deleteNode (id)
+	--redis.log(3, "deleting node " .. id )
 	redis.call("zrem", nodeSetKey, id )
-	redis.call("srem", affinityKey, id)
+	redis.call("hdel", affinityKey, id)
+
 	local nodeWorkKey = workKey..":"..id
 	--go through the work that this node was assigned and remove it.
 	local assignedWork = redis.call("SMEMBERS", nodeWorkKey)
-	for _,wokr in ipairs(assignedWork) do
+	for _,work in ipairs(assignedWork) do
 		redis.call("hdel", workKey, work)
 	end
 	redis.call("del", nodeWorkKey)
 end
 
 --update values to make sure that this node is recorded.
-function update()
-	redis.log(3,"update")
+local function update()
+	--redis.log(3,"update")
 	--Update set of live nodes to contain self, with current time as the score.
-	redis.call('zadd', nodeSetKey, nodeUUID, currentTime)
+	redis.call('zadd', nodeSetKey,  currentTime, nodeUUID)
 	--update the affinity.
 	updateAffinity(nodeUUID, nodeAffinity)
 end
 
 --clean up all old nodes, if they have been dropped.
-function cleanup()
-	redis.log(3,"cleanup")
-	deadNodes = redis.call('ZRANGEBYSCORE', nodeSetKey, 0, deadTime)
+local function cleanup()
+	--redis.log(3,"cleanup")
+	local deadNodes = redis.call('ZRANGEBYSCORE', nodeSetKey, 0, deadTime)
 	--Set the key/value lists for the work asignments.
 	for _,deadNode in ipairs(deadNodes) do
-		deleteNode(id)
+		deleteNode(deadNode)
 	end
 end
 
 
 --assign work to nodes.
-function assign()
-	redis.log(3, "asigning.")
-	updateAffinityChances()
+local function assign()
+	--redis.log(3, "asigning.")
+	
 	--get the current work
-	local work = redis.call("pubsub", "channels", masterKey)
+	local work = redis.call("pubsub", "channels", masterKey..":*")
 	--get the previous work
-	local oldWork redis.call("sget", currentWorkKey)
+	local oldWork = redis.call("hkeys", workKey)
+
 	--save the current work to currentWorkKey
 	redis.call("del", currentWorkKey)
-	redis.call("sadd", currentWorkKey, unpack(work))
+	if #work >0 then
+		redis.call("sadd", currentWorkKey, unpack(work))
+	else
+		--redis.log(3, "no work to assign")
+	end
 	--savePreviousWork to previousWorkKey
 	redis.call("del", oldWorkKey)
-	redis.call("sadd", oldWorkKey, unpack(oldWork))
+	if #oldWork > 0 then
+		redis.call("sadd", oldWorkKey, unpack(oldWork))
+	else
+		--redis.log(3, "no old work to assign")
+	end
 	--get the difference between the two works
 	local toDelete = redis.call("sdiff", oldWorkKey, currentWorkKey)
-	local toAdd= redis.call("sdiff", currentWorkKey, oldWorkKey)
+	local toAdd = redis.call("sdiff", currentWorkKey, oldWorkKey)
 	
 	for _,work in ipairs(toDelete) do
 		deleteWork(work)
 	end
-	for _,work in ipairs(toAdd) do
-		assignWork(work)
-	end
 
+	if #toAdd >0 then 
+		updateAffinityChances()
+		for _,work in ipairs(toAdd) do
+			assignWork(work)
+		end
+	end
 end
 
 
+log()
 
 update()
 cleanup()
 assign()
+
+return redis.call("smembers", workKey..":"..nodeUUID)
