@@ -14,20 +14,25 @@ import (
 
 func main() {
 	fmt.Println("HI")
-	//siulators()
+	siulators()
 	makeWatcher(true)
 }
 
+var keyStr = "test"
+var watchers = 10
+var subscribers = 10000
+
 func siulators() {
-	for i := 0; i < 3; i++ {
+	for i := 0; i < watchers; i++ {
 		go makeWatcher(false)
 	}
+	time.Sleep(time.Second)
 	client := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "Password1234", // no password set
 		DB:       0,              // use default DB
 	})
-	for i := 0; i < 10; i++ {
+	for i := 0; i < subscribers; i++ {
 		go makeSub(client, i)
 	}
 }
@@ -45,7 +50,7 @@ func makeWatcher(print bool) {
 	// 	fmt.Printf(err.Error())
 	// }
 	// fmt.Printf("CHANNELS %v (%T)\n", res, res)
-	divider = rd.NewDivider(client, "poll", nil, 10)
+	divider = rd.NewDivider(client, keyStr, nil, 10)
 	divider.Start()
 	//divider.SetAffinity(1000)
 	//divider.SetAffinity(2000)
@@ -71,14 +76,14 @@ func makeWatcher(print bool) {
 
 func makeSub(client *redis.Client, i int) {
 
-	sub := client.Subscribe(context.Background(), "poll:"+strconv.Itoa(i))
+	sub := client.Subscribe(context.Background(), keyStr+":"+strconv.Itoa(i))
 
 	channel := sub.Channel()
 
 	for {
 		select {
 		case d := <-channel:
-			fmt.Printf("data on channel %s\n", d.String())
+			fmt.Printf("data on channel %d: %s\n", i, d.String())
 		}
 	}
 }

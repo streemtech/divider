@@ -140,6 +140,10 @@ local function update()
 	updateAffinity(nodeUUID, nodeAffinity)
 end
 
+local function cleanAssigned() 
+	redis.log(3, "clean assignd values to make sure that no value is stuck.")
+end
+
 --clean up all old nodes, if they have been dropped.
 local function cleanup()
 	--redis.log(3,"cleanup")
@@ -148,8 +152,14 @@ local function cleanup()
 	for _,deadNode in ipairs(deadNodes) do
 		deleteNode(deadNode)
 	end
+
+	if math.random()>0.99 then
+		cleanAssigned()
+	end
 end
 
+--TODO I need to do a cleanup every so often, otherwise its possible for work to get stuck
+--WORK stuck means that the node no longer exists, but the work is still a value in __meat:work:assigned
 
 --assign work to nodes.
 local function assign()
