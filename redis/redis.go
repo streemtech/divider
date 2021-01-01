@@ -2,23 +2,40 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/streemtech/divider"
 
-	"github.com/go-redis/redis/v8"
+	redis "github.com/go-redis/redis/v8"
 )
 
 //TODO4 split pubsub divider and regular divider?
 
 //Divider is a redis backed implementation of divider.Divider. The
 type Divider struct {
-	redis       *redis.Client
-	masterKey   string
-	metaKey     string
+	redis *redis.Client
+
+	//searchKey     is the key that is searched, <key>:* that
+	searchKey string
+
+	//infoKey       is a string stored after <key>:__meta:info. It is a string object that is parsed and stores the required information to split work.
+	infoKey string
+
+	//masterKey     is a string stored after <key>:__meta:master. It is a string that holds the UUID of the master. the only instance allowed to edit info.
+	masterKey string
+
+	//updateTimeKey is a string stored after <key>:__meta:lastUpdate. It is a set that holds the last update times of all nodes. It is used to determine what nodes have offlined.
+	updateTimeKey string
+
+	//affinityKey is a string stored after <key>:__meta:affinity. It is a set that holds the last update times of all nodes. It is used to determine what nodes have offlined.
+	affinityKey string
+
 	affinity    divider.Affinity
 	mux         *sync.Mutex
 	startChan   chan string
@@ -32,7 +49,8 @@ type Divider struct {
 }
 
 //NewDivider returns a Divider using the Go-Redis library as a backend.
-//The keys beginning in <masterKey>/__meta are used to keep track of the different metainformation to
+//The keys beginning in <masterKey>:__meta are used to keep track of the different metainformation to
+//:* is appended automatically!!
 func NewDivider(redis *redis.Client, masterKey string, informer divider.Informer, timeout int) *Divider {
 	var i divider.Informer
 	if informer == nil {
@@ -47,24 +65,32 @@ func NewDivider(redis *redis.Client, masterKey string, informer divider.Informer
 	} else {
 		t = timeout
 	}
-	return &Divider{
-		redis:     redis,
-		masterKey: masterKey,
-		metaKey:   masterKey + ":__meta",
-		affinity:  0,
-		mux:       &sync.Mutex{},
-		startChan: make(chan string),
-		stopChan:  make(chan string),
-		uuid:      uuid.New().String(),
-		informer:  i,
-		timeout:   t,
+
+	d := &Divider{
+		redis:         redis,
+		searchKey:     masterKey + ":*",
+		infoKey:       masterKey + ":__meta:info",
+		masterKey:     masterKey + ":__meta:master",
+		updateTimeKey: masterKey + ":__meta:lastUpdate",
+		affinityKey:   masterKey + ":__meta:affinity",
+		affinity:      0,
+		mux:           &sync.Mutex{},
+		startChan:     make(chan string),
+		stopChan:      make(chan string),
+		uuid:          uuid.New().String(),
+		informer:      i,
+		timeout:       t,
 	}
+
+	return d
 }
 
 //Start is the trigger to make the divider begin checking for keys, and returning those keys to the channels.
 //No values should return to the channels without start being called.
 func (r *Divider) Start() {
 	r.mux.Lock()
+	//TODO
+	//make so I cant start multiple times.
 	r.start()
 	r.mux.Unlock()
 }
@@ -161,13 +187,13 @@ func (r *Divider) start() {
 		r.affinity = 1000
 	}
 	r.setAffinity(r.affinity)
-	go r.watchForKeys()
+	r.watch()
 
 }
 
 func (r *Divider) stop() {
 	aff := r.GetAffinity()
-	r.setAffinity(math.MaxInt64)
+	r.setAffinity(0)
 	r.doneCancel()
 	r.done = nil
 	r.doneCancel = nil
@@ -205,14 +231,22 @@ func (r *Divider) compareKeys() {
 	}
 
 	for key := range toAdd {
+		//TODO make only so that it sends if the chan has been grabbed.
 		r.startChan <- key
 		r.currentKeys[key] = true
 	}
 
 	for key := range toRemove {
+		//TODO make only so that it sends if the chan has been grabbed.
 		r.stopChan <- key
 		delete(r.currentKeys, key)
 	}
+}
+
+func (r *Divider) watch() {
+
+	go r.watchForKeys()
+	go r.watchForUpdates()
 }
 
 func (r *Divider) watchForKeys() {
@@ -227,281 +261,378 @@ func (r *Divider) watchForKeys() {
 	}
 }
 
+func (r *Divider) watchForUpdates() {
+
+	for {
+		select {
+		case <-time.After(time.Millisecond * 500):
+			r.updateAssignments()
+		case <-r.done.Done():
+			return
+		}
+	}
+}
+
 //Internal affinity setting.
 func (r *Divider) setAffinity(Affinity divider.Affinity) {
-	r.affinity = Affinity
+	r.redis.HSet(r.done, r.affinityKey, r.uuid, int64(Affinity))
 }
 
 func (r *Divider) sendStopProcessing(key string) {
-	keys := []string{r.metaKey + ":work"}
-	args := []string{key}
-	res, err := sendStopProcessingScript.Run(r.done, r.redis, keys, args).Result()
-	if err != nil && err.Error() != "redis: nil" {
-		r.informer.Errorf(err.Error())
-		return
-	}
-	r.informer.Infof("%v", res)
+
 }
 
 func (r *Divider) getAssignedProcessingArray() []string {
-	/*
-		-- main.lua is responsible for the cleanup and running of this implementaiton of the divider
-		-- KEY1 is the poll meta key. (poll:__meta)
-		-- KEY2 is the poll master key (poll)
-		-- ARG1 UUID of this node
-		-- ARG2 Current Time (Unix Seconds)
-		-- ARG3 timeout time (N Seconds)
-		-- ARG4 affinity
-	*/
 
-	keys := []string{r.metaKey, r.masterKey}
-	args := []interface{}{r.uuid, time.Now().Unix(), r.timeout, int(r.affinity)}
-	res, err := getAssignedProcessingScript.Run(r.done, r.redis, keys, args).Result()
-	if err != nil && err.Error() != "redis: nil" {
-		r.informer.Errorf(err.Error())
+	//update the time.
+	r.redis.HSet(r.done, r.updateTimeKey, r.uuid, time.Now().UnixNano())
+
+	str, err := r.redis.Get(r.done, r.infoKey).Result()
+	if err != nil {
 		return []string{}
 	}
-	//r.informer.Infof("RESPONSE: %v, %T", res, res)
-	return format(res)
-	//return []string{}
-}
+	//unmarshal
+	dat := &DividerData{}
 
-func format(in interface{}) (out []string) {
-	arr := in.([]interface{})
-	out = make([]string, len(arr))
-	for i, v := range arr {
-		out[i] = v.(string)
+	err = json.Unmarshal([]byte(str), dat)
+	if err != nil {
+		return []string{}
 	}
-	return out
+	return dat.NodeWork[r.uuid]
 }
 
-var sendStopProcessingScript = redis.NewScript(`
---ARG1 The Work ID
---KEY1 __meta:work
+//updates all assignments if master.
+func (r *Divider) updateAssignments() {
+	r.redis.HSet(r.done, r.updateTimeKey, r.uuid, time.Now().UnixNano())
 
-redis.call('hdel' KEYS[1], ARGV[1]) -- delete from the list of work-node, the asigned work 
-`)
+	_, err := r.redis.SetNX(r.done, r.masterKey, r.uuid, time.Second*3).Result()
+	if err != nil {
+		r.informer.Errorf("update if master does not exist error: %s!", err.Error())
+		return
+	}
 
-//TODO1 need some way to remove a key from the list of work.
-var getAssignedProcessingScript = redis.NewScript(`-- main.lua is responsible for the cleanup and running of this implementaiton of the divider
--- KEY1 is the poll meta key. (poll:__meta)
--- KEY2 is the poll master key (poll)
--- ARG1 UUID of this node
--- ARG2 Current Time (Unix Seconds)
--- ARG3 timeout time (N Seconds)
--- ARG4 affinity
+	master, err := r.redis.Get(r.done, r.masterKey).Result()
+	if err != nil {
+		r.informer.Errorf("get current master error: %s!", err.Error())
+		return
+	}
 
+	if master == r.uuid {
+		_, err = r.redis.Set(r.done, r.masterKey, r.uuid, time.Second*3).Result()
+		if err != nil {
+			r.informer.Errorf("update master timeout error: %s!", err.Error())
+			return
+		}
+	} else {
+		return
+	}
 
---need some way to store timeouts.
---need some way to check what work is assigned to what node
---
+	err = r.updateData()
 
---**********************************
-local metaKey = KEYS[1]
-local masterKey = KEYS[2]
-local nodeUUID = ARGV[1]
-local currentTime = ARGV[2]
-local timeout = ARGV[3]
-local deadTime = currentTime-timeout
-local nodeAffinity = ARGV[4]
+}
 
+func (r *Divider) updateData() error {
+	//check if the info exists or not.
+	i, err := r.redis.Exists(r.done, r.infoKey).Result()
+	if err != nil {
+		return err
+	}
+	str := ""
+	dat := &DividerData{}
+	newData := &DividerData{}
+	//if the data exists, get it.
+	if i == 1 {
+		str, err = r.redis.Get(r.done, r.infoKey).Result()
+		if err != nil {
+			return err
+		}
+		//unmarshal
+		err = json.Unmarshal([]byte(str), dat)
+		if err != nil {
+			return err
+		}
 
-local nodeSetKey = metaKey .. ":nodes"
-local affinityKey = metaKey .. ":affinity:affinity"
-local chanceKey = metaKey .. ":assignmentChance"
-local workKey = metaKey..":work:assigned" --work stores where the work is assigned. work:id stores what work was assigned to that key.
-local currentWorkKey = metaKey..":work:current"
-local oldWorkKey = metaKey..":work:old"
+	} else {
+		dat = &DividerData{
+			work:     make(map[string]string),
+			Worker:   make(map[string]string),
+			NodeWork: make(map[string][]string),
+		}
+	}
 
-local function log() 
-	--redis.log(3, "\nmetaKey:" .. metaKey ..
-	-- "\nmasterKey: " .. masterKey ..
-	-- "\nnodeUUID: " .. nodeUUID ..
-	-- "\ncurrentTime: " .. currentTime ..
-	-- "\ntimeout: " .. timeout ..
-	-- "\ndeadTime: " .. deadTime ..
-	-- "\nnodeAffinity: " .. nodeAffinity ..
-	-- "\nnodeSetKey: " .. nodeSetKey ..
-	-- "\naffinityKey: " .. affinityKey ..
-	-- "\nchanceKey: " .. chanceKey ..
-	-- "\nworkKey: " .. workKey )
+	//calculate the new data.
+	newData, err = r.calculateData(dat)
+	if err != nil {
+		return err
+	}
+	//store into a string.
+	newDataStr, err := json.Marshal(newData)
+	if err != nil {
+		return err
+	}
 
-end
+	str, err = r.redis.Set(r.done, r.infoKey, newDataStr, 0).Result()
+	if err != nil {
+		return err
+	}
+	return nil
+}
 
+func (r *Divider) calculateData(old *DividerData) (new *DividerData, err error) {
+	//if not zero, decrease. This allows for a timeout to allow for ballancing the inputs.
 
+	//get most up to date jobs.
+	data, err := r.redis.PubSubChannels(r.done, r.searchKey).Result()
+	if err != nil {
+		return &DividerData{}, err
+	}
 
+	//Parse times.
+	timeoutStrings, err := r.redis.HGetAll(r.done, r.updateTimeKey).Result()
+	if err != nil {
+		return &DividerData{}, err
+	}
+	timeouts := make(map[string]int64)
+	for k, v := range timeoutStrings {
+		timeouts[k], err = strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return &DividerData{}, err
+		}
+	}
 
---set the work to having that node for it;s worker, and add the work to the set of work that this node is working on.
-local function assignWorkToNode(workId, NodeId) 
-	--redis.log(3, "asigning work To Node: " .. workId .." Node: ".. NodeId)
-	redis.call("hset", workKey, workId, NodeId) --set what node is working on this work
-	redis.call("sadd", workKey..":"..NodeId, workId) --set that this node has this work. 
-end
+	//Parse affinity values.
+	affinityStrings, err := r.redis.HGetAll(r.done, r.affinityKey).Result()
+	if err != nil {
+		return &DividerData{}, err
+	}
+	affinities := make(map[string]int64)
+	for k, v := range affinityStrings {
+		affinities[k], err = strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return &DividerData{}, err
+		}
+	}
 
-local function assignWork (workId)
-	--redis.log(3, "Asigning Work: ".. workId)
-	local node = redis.call("ZRANGEBYSCORE", chanceKey, math.random(),2,  "LIMIT", 0 ,1)
-	assignWorkToNode(workId, node[1])
-end
+	workMap := make(map[string]string)
+	for _, v := range data {
+		workMap[v] = v
+	}
+	new = &DividerData{
+		work:            workMap,
+		Worker:          old.Worker,
+		NodeWork:        old.NodeWork,
+		lastUpdateTimes: timeouts,
+		affinities:      affinities,
+		sumAffinity:     0,
+		nodeChange:      make(map[string]int),
+	}
+	if new.Worker == nil {
+		new.Worker = make(map[string]string)
+	}
+	if new.NodeWork == nil {
+		new.NodeWork = make(map[string][]string)
+	}
 
-local function deleteWork (workId)
-	--redis.log(3, "deleting work: ".. workId)
-	local worker = redis.call("hget", workKey, workId) --get what node is working on this work
-	redis.call("hdel", workKey, workId)
-	redis.call("srem", workKey..":"..worker)
+	r.deleteExpiredWorkers(new)
+	r.deleteRemovedWork(new)
+	for _, v := range new.affinities {
+		new.sumAffinity += int(v)
+	}
+	r.calculateNodeChanges(new)
+	r.sortNodeChanges(new)
+	r.updateNodeWork(new)
+	r.updateWorker(new)
 
-end
+	return new, nil
+}
 
---update the list of affinities's chances in the key. wont update if not needed.
-local function updateAffinityChances()
-	--redis.log(3, "updating Affinity.")
+//loop through the list of times. If the timeout time is after the last update, add to a to delete, and then delete.
+func (r *Divider) deleteExpiredWorkers(data *DividerData) {
+	toDelete := make([]string, 0)
+	timeout := time.Now().Add(time.Second * -1 * time.Duration(r.timeout))
+	for k, v := range data.lastUpdateTimes {
+		t := time.Unix(0, v)
+		if timeout.After(t) {
+			toDelete = append(toDelete, k)
+		}
+	}
 
+	for k := range data.affinities {
+		_, ok := data.lastUpdateTimes[k]
+		if !ok {
+			toDelete = append(toDelete, k)
+		}
+	}
 
-	local sum = 0;
-	local affinityVals = redis.call("hvals", affinityKey)
-	for _,val in ipairs(affinityVals) do
+	for _, v := range toDelete {
+		delete(data.lastUpdateTimes, v)
+		delete(data.NodeWork, v)
+		delete(data.affinities, v)
+		go r.deleteNode(data, v)
+	}
+}
 
-		sum = sum  + val
-	end
+func (r *Divider) deleteNode(data *DividerData, node string) {
+	//TODO
 
+	e := r.redis.HDel(r.done, r.updateTimeKey, node).Err()
+	if e != nil {
+		r.informer.Errorf("Divider: Error deleting node %s: %s", node, e.Error())
+	}
+	e = r.redis.HDel(r.done, r.affinityKey, node).Err()
+	if e != nil {
+		r.informer.Errorf("Divider: Error deleting node %s: %s", node, e.Error())
+	}
+}
 
-	redis.call("del", chanceKey)
-	local affinities = redis.call("hgetall", affinityKey)
+func (r *Divider) deleteRemovedWork(data *DividerData) {
+	for k := range data.Worker {
+		if _, ok := data.work[k]; !ok {
+			delete(data.Worker, k)
+		}
+	}
+}
 
-	local score = 0
-	local key = ""
-	local weight = 0
-	for i,val in ipairs(affinities) do
+func (r *Divider) calculateNodeChanges(data *DividerData) {
+	workCount := len(data.work)
+	workPerAff := float64(workCount) / float64(data.sumAffinity)
 
-		if (i % 2 == 1) then
-			key = val
-		else
-			weight = weight + val/sum
-			redis.call("zadd", chanceKey, weight, key)
-		end
-	end
+	//calculate the total per node, rounding down.
+	nodeWorkCount := make(map[string]int)
+	total := 0
+	for k, v := range data.affinities {
+		nodeWorkCount[k] = int(math.Floor(float64(v) * workPerAff))
+		total += nodeWorkCount[k]
+	}
 
-	redis.call("zadd", chanceKey, 1, key)
+	//add extra to make sure that the total matches the ammount given.
+	toAdd := workCount - total
+	for _, k := range r.sortNodeChanges(data) {
+		if toAdd == 0 {
+			break
+		}
+		nodeWorkCount[k.uuid]++
+		toAdd--
+	}
 
-end
+	//calculate the actual change in each node.
+	for k, v := range nodeWorkCount {
+		c := v - len(data.NodeWork[k])
+		if c != 0 {
+			data.nodeChange[k] = c
+		}
+	}
+}
 
+//make it so that items with the same affinity have nodes assigned to them in order.
+func (r *Divider) sortNodeChanges(data *DividerData) NodeChangesSort {
+	//TODO sort the nodeChange based A: the
+	changes := make(NodeChangesSort, 0)
+	//different affinities should have, at most one difference in count
 
+	for k := range data.NodeWork {
+		changes = append(changes, NodeChange{
+			affinity: data.affinities[k],
+			uuid:     k,
+		})
+	}
 
+	sort.Sort(changes)
+	return changes
+}
 
---update the affinity for a specific node, and update the sum affinity.
-local function updateAffinity (id, affinity)
-	--redis.log(3, "updating affinity " .. id .." to ".. affinity)
-	local exists = redis.call("hexists", affinityKey, id)
+type NodeChange struct {
+	uuid     string
+	affinity int64
+}
 
-	if exists == 1 then
-		local current = redis.call("hget", affinityKey, id)
-		redis.call("hset", affinityKey, id, affinity)
-	else
-		redis.call("hset", affinityKey, id, affinity)
-	end
-end
+type NodeChangesSort []NodeChange
 
---remove a node from the different lists, removing its affinity. also remove work not assigned from the list.
-local function deleteNode (id)
-	--redis.log(3, "deleting node " .. id )
-	redis.call("zrem", nodeSetKey, id )
-	redis.call("hdel", affinityKey, id)
+func (a NodeChangesSort) Len() int      { return len(a) }
+func (a NodeChangesSort) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+func (a NodeChangesSort) Less(i, j int) bool {
+	if a[i].affinity > a[j].affinity {
+		return true
+	}
+	if a[i].affinity < a[j].affinity {
+		return false
+	}
+	return a[i].uuid > a[j].uuid
+}
 
-	local nodeWorkKey = workKey..":"..id
-	--go through the work that this node was assigned and remove it.
-	local assignedWork = redis.call("SMEMBERS", nodeWorkKey)
-	for _,work in ipairs(assignedWork) do
-		redis.call("hdel", workKey, work)
-	end
-	redis.call("del", nodeWorkKey)
-end
+func (r *Divider) updateNodeWork(data *DividerData) {
+	//Remove work from nodes that have negative node change.
 
---update values to make sure that this node is recorded.
-local function update()
-	--redis.log(3,"update")
-	--Update set of live nodes to contain self, with current time as the score.
-	redis.call('zadd', nodeSetKey,  currentTime, nodeUUID)
-	--update the affinity.
-	updateAffinity(nodeUUID, nodeAffinity)
-end
+	//delete from the NodeWork based on nodeChange.
+	for node, change := range data.nodeChange {
+		if change < 0 {
+			workCount := len(data.NodeWork[node])
+			if workCount+change <= 0 {
+				//if there is NO work, because the total change is zero, delete from the list
+				delete(data.NodeWork, node)
+			} else {
+				data.NodeWork[node] = data.NodeWork[node][0 : workCount+change]
+			}
+			//delete as it wont be needed for the positive change loop.
+			delete(data.nodeChange, node)
+		}
+	}
 
---clean up all old nodes, if they have been dropped.
-local function cleanup()
-	--redis.log(3,"cleanup")
-	local deadNodes = redis.call('ZRANGEBYSCORE', nodeSetKey, 0, deadTime)
-	--Set the key/value lists for the work asignments.
-	for _,deadNode in ipairs(deadNodes) do
-		deleteNode(deadNode)
-	end
-end
+	//remove all work from the work list that is currently assigned to a node.
+	for _, workSet := range data.NodeWork {
+		if workSet != nil {
 
+			for _, work := range workSet {
+				delete(data.work, work)
+			}
+		}
+	}
 
---assign work to nodes.
-local function assign()
-	--redis.log(3, "asigning.")
-	
-	--get the current work
-	local work = redis.call("pubsub", "channels", masterKey..":*")
-	--get the previous work
-	local oldWork = redis.call("hkeys", workKey)
+	//convert remaning work to an array of work to be assigned.
+	workArray := make([]string, 0)
+	for _, v := range data.work {
+		workArray = append(workArray, v)
+	}
 
-	--save the current work to currentWorkKey
-	redis.call("del", currentWorkKey)
-	if #work >0 then
-		redis.call("sadd", currentWorkKey, unpack(work))
-	else
-		--redis.log(3, "no work to assign")
-	end
-	--savePreviousWork to previousWorkKey
-	redis.call("del", oldWorkKey)
-	if #oldWork > 0 then
-		redis.call("sadd", oldWorkKey, unpack(oldWork))
-	else
-		--redis.log(3, "no old work to assign")
-	end
-	--get the difference between the two works
-	local toDelete = redis.call("sdiff", oldWorkKey, currentWorkKey)
-	local toAdd = redis.call("sdiff", currentWorkKey, oldWorkKey)
-	
-	for _,work in ipairs(toDelete) do
-		deleteWork(work)
-	end
+	//loop through the positive node changes, appending to the NodeWorker based on the
+	workIdx := 0
+	for node, change := range data.nodeChange {
+		if change > 0 {
+			for i := 0; i < change; i++ {
+				if data.NodeWork[node] == nil {
+					data.NodeWork[node] = make([]string, 0)
+				} //This is erroring because there is no work. There is no WORK because it has already been asigned to another node. for SOME reason tho,
+				data.NodeWork[node] = append(data.NodeWork[node], workArray[workIdx])
+				workIdx++
+			}
+		} else {
+			//TODO error.
+		}
+	}
+}
 
-	if #toAdd >0 then 
-		updateAffinityChances()
-		for _,work in ipairs(toAdd) do
-			assignWork(work)
-		end
-	end
-end
+func (r *Divider) updateWorker(data *DividerData) {
+	for Node, workSet := range data.NodeWork {
+		for _, work := range workSet {
+			data.Worker[work] = Node
+		}
+	}
+}
 
-
-log()
-
-update()
-cleanup()
-assign()
-
-return redis.call("smembers", workKey..":"..nodeUUID)`)
-
-/*
-
-all data prefexed with <masterKey>:__meta:
-
-timeout stored as :timeout:<UUID>
-affinity stored in hmset :affinity
-work is assigned in hmset :work
-	the key is the work
-	the value is the <UUID> of the node it is assigned to.
-the list of work each node has is in set :assign:<UUID>
-
-//the list of active work is read based on the list of pub-subs
-//based on that list, it is compared to the list of known work.
-//any known ones are ignored.
-//unasigned ones are divied out based on the CURRENT affinity.
-
-work list is hmset :work
-	key is the workID, value is the node UUID
-
-
-*/
+//DividerData holds all information that is used to divide work.
+type DividerData struct {
+	//Work is the list of work to be done.
+	work map[string]string
+	//the time in which the key Node was last updated
+	lastUpdateTimes map[string]int64
+	//Affinities is the map of node to affinity.
+	affinities map[string]int64
+	//sumAffinity is the change in affinity that each node has.
+	sumAffinity int
+	//Worker is map[workId]workerNode
+	Worker map[string]string
+	//NodeWork is a map[workerNode][]work to allow for looking up what work a particular node is working on
+	NodeWork map[string][]string
+	//nodeChanges is the map[workerNode]change that calculates how many nodes the
+	nodeChange map[string]int
+}

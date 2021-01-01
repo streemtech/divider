@@ -83,3 +83,14 @@ func (d DefaultLogger) Infof(message string, args ...interface{}) {
 func (d DefaultLogger) Errorf(message string, args ...interface{}) {
 	fmt.Printf("ERROR: %s\n", fmt.Sprintf(message, args...))
 }
+
+//EmptyLogger is a quick and dirty logger that prints nothing, which matches the Informer interface.
+type EmptyLogger struct{}
+
+//Infof for the EmptyLogger prints nothing
+func (d EmptyLogger) Infof(message string, args ...interface{}) {
+}
+
+//Errorf for the EmptyLogger prints nothing
+func (d EmptyLogger) Errorf(message string, args ...interface{}) {
+}

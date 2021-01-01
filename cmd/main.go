@@ -13,18 +13,23 @@ import (
 )
 
 func main() {
-	fmt.Println("HI")
-	siulators()
-	makeWatcher(true)
+
+
+	if massTest {
+		siulators()
+	}
+
+	makeWatcher(false, -1)
 }
 
+var massTest = true
 var keyStr = "test"
-var watchers = 10
+var watchers = 2
 var subscribers = 10000
 
 func siulators() {
 	for i := 0; i < watchers; i++ {
-		go makeWatcher(false)
+		go makeWatcher(false, i)
 	}
 	time.Sleep(time.Second)
 	client := redis.NewClient(&redis.Options{
@@ -37,7 +42,7 @@ func siulators() {
 	}
 }
 
-func makeWatcher(print bool) {
+func makeWatcher(print bool, idx int) {
 	var divider divider.Divider
 	client := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
@@ -67,9 +72,15 @@ func makeWatcher(print bool) {
 			fmt.Printf("%s %v\n", dur.String(), vals)
 		}
 	} else {
+		in := divider.GetReceiveStartProcessingChan()
+		out := divider.GetReceiveStopProcessingChan()
 		for {
-			time.Sleep(time.Second)
-			divider.GetAssignedProcessingArray()
+			select {
+			case i := <-in: //currently thrashing. I suspect that it is because the assignment order is technicall inconsistent.
+				fmt.Printf("New  Data for %d: %s\n", idx, i)
+			case i := <-out:
+				fmt.Printf("Stop Data For %d: %s\n", idx, i)
+			}
 		}
 	}
 }
