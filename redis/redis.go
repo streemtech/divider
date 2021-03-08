@@ -51,7 +51,7 @@ type Divider struct {
 //NewDivider returns a Divider using the Go-Redis library as a backend.
 //The keys beginning in <masterKey>:__meta are used to keep track of the different metainformation to
 //:* is appended automatically!!
-func NewDivider(redis *redis.Client, masterKey string, informer divider.Informer, timeout int) *Divider {
+func NewDivider(redis *redis.Client, masterKey, name string, informer divider.Informer, timeout int) *Divider {
 	var i divider.Informer
 	if informer == nil {
 		i = divider.DefaultLogger{}
@@ -66,6 +66,12 @@ func NewDivider(redis *redis.Client, masterKey string, informer divider.Informer
 		t = timeout
 	}
 
+	//set the UUID.
+	UUID := name
+	if UUID == "" {
+		UUID = uuid.New().String()
+	}
+
 	d := &Divider{
 		redis:         redis,
 		searchKey:     masterKey + ":*",
@@ -77,7 +83,7 @@ func NewDivider(redis *redis.Client, masterKey string, informer divider.Informer
 		mux:           &sync.Mutex{},
 		startChan:     make(chan string),
 		stopChan:      make(chan string),
-		uuid:          uuid.New().String(),
+		uuid:          UUID,
 		informer:      i,
 		timeout:       t,
 	}
@@ -249,6 +255,7 @@ func (r *Divider) watch() {
 	go r.watchForUpdates()
 }
 
+//watchForKeys is a function looped to constantly look for new keys that need results output to them.
 func (r *Divider) watchForKeys() {
 
 	for {
@@ -261,6 +268,7 @@ func (r *Divider) watchForKeys() {
 	}
 }
 
+//watchForUpdates is a function looped to constantly check the system and make sure that the work is divided right.
 func (r *Divider) watchForUpdates() {
 
 	for {
@@ -305,32 +313,43 @@ func (r *Divider) getAssignedProcessingArray() []string {
 func (r *Divider) updateAssignments() {
 	r.redis.HSet(r.done, r.updateTimeKey, r.uuid, time.Now().UnixNano())
 
-	_, err := r.redis.SetNX(r.done, r.masterKey, r.uuid, time.Second*3).Result()
+	//set the master key to this value if it does not exist.
+	set, err := r.redis.SetNX(r.done, r.masterKey, r.uuid, time.Second*3).Result()
 	if err != nil {
 		r.informer.Errorf("update if master does not exist error: %s!", err.Error())
 		return
 	}
+	if set {
+		r.informer.Infof("The master was set to this node: %s", r.uuid)
+	}
 
+	//check the master key.
 	master, err := r.redis.Get(r.done, r.masterKey).Result()
 	if err != nil {
 		r.informer.Errorf("get current master error: %s!", err.Error())
 		return
 	}
 
+	//if this is the master, run the update (setting the timeout to 3 seconds)
 	if master == r.uuid {
 		_, err = r.redis.Set(r.done, r.masterKey, r.uuid, time.Second*3).Result()
 		if err != nil {
 			r.informer.Errorf("update master timeout error: %s!", err.Error())
 			return
 		}
-	} else {
-		return
-	}
+		err = r.updateData()
 
-	err = r.updateData()
+		if err != nil {
+			r.informer.Errorf("Error when updating data: %s!", err.Error())
+			return
+		}
+
+	}
+	return
 
 }
 
+//updateData does the work to keep track of the work distribution.
 func (r *Divider) updateData() error {
 	//check if the info exists or not.
 	i, err := r.redis.Exists(r.done, r.infoKey).Result()
@@ -381,17 +400,12 @@ func (r *Divider) updateData() error {
 func (r *Divider) calculateData(old *DividerData) (new *DividerData, err error) {
 	//if not zero, decrease. This allows for a timeout to allow for ballancing the inputs.
 
-	//get most up to date jobs.
-	data, err := r.redis.PubSubChannels(r.done, r.searchKey).Result()
-	if err != nil {
-		return &DividerData{}, err
-	}
-
-	//Parse times.
+	//get the list of update times.
 	timeoutStrings, err := r.redis.HGetAll(r.done, r.updateTimeKey).Result()
 	if err != nil {
 		return &DividerData{}, err
 	}
+	//convert the timeouts from strings to ints.
 	timeouts := make(map[string]int64)
 	for k, v := range timeoutStrings {
 		timeouts[k], err = strconv.ParseInt(v, 10, 64)
@@ -400,11 +414,12 @@ func (r *Divider) calculateData(old *DividerData) (new *DividerData, err error) 
 		}
 	}
 
-	//Parse affinity values.
+	//get the worker affinity values.
 	affinityStrings, err := r.redis.HGetAll(r.done, r.affinityKey).Result()
 	if err != nil {
 		return &DividerData{}, err
 	}
+	//convert the worker affinities to ints.
 	affinities := make(map[string]int64)
 	for k, v := range affinityStrings {
 		affinities[k], err = strconv.ParseInt(v, 10, 64)
@@ -413,6 +428,13 @@ func (r *Divider) calculateData(old *DividerData) (new *DividerData, err error) 
 		}
 	}
 
+	//get most up to date list of subscriptions.
+	data, err := r.redis.PubSubChannels(r.done, r.searchKey).Result()
+	if err != nil {
+		return &DividerData{}, err
+	}
+
+	//add the subscriptions to a map of work to be completed.
 	workMap := make(map[string]string)
 	for _, v := range data {
 		workMap[v] = v
@@ -426,6 +448,7 @@ func (r *Divider) calculateData(old *DividerData) (new *DividerData, err error) 
 		sumAffinity:     0,
 		nodeChange:      make(map[string]int),
 	}
+	//if work didnt exist, add this to the list.
 	if new.Worker == nil {
 		new.Worker = make(map[string]string)
 	}
@@ -436,10 +459,10 @@ func (r *Divider) calculateData(old *DividerData) (new *DividerData, err error) 
 	r.deleteExpiredWorkers(new)
 	r.deleteRemovedWork(new)
 	for _, v := range new.affinities {
+		//recalculate the affinity
 		new.sumAffinity += int(v)
 	}
 	r.calculateNodeChanges(new)
-	r.sortNodeChanges(new)
 	r.updateNodeWork(new)
 	r.updateWorker(new)
 
@@ -450,13 +473,18 @@ func (r *Divider) calculateData(old *DividerData) (new *DividerData, err error) 
 func (r *Divider) deleteExpiredWorkers(data *DividerData) {
 	toDelete := make([]string, 0)
 	timeout := time.Now().Add(time.Second * -1 * time.Duration(r.timeout))
+
+	//go through the list of last update times.
 	for k, v := range data.lastUpdateTimes {
 		t := time.Unix(0, v)
+		//any value that is after now, delete it
 		if timeout.After(t) {
+			r.informer.Infof("Timed out %s. Last updated %s", k, t.String())
 			toDelete = append(toDelete, k)
 		}
 	}
 
+	//find any nodes in affinities that no longer has an update time, and add it to the to delete list.
 	for k := range data.affinities {
 		_, ok := data.lastUpdateTimes[k]
 		if !ok {
@@ -464,7 +492,10 @@ func (r *Divider) deleteExpiredWorkers(data *DividerData) {
 		}
 	}
 
+	//delete from the list of work, updatetimes, and affinities this value.
 	for _, v := range toDelete {
+		r.informer.Infof("Deleting node %s", v)
+
 		delete(data.lastUpdateTimes, v)
 		delete(data.NodeWork, v)
 		delete(data.affinities, v)
@@ -472,19 +503,23 @@ func (r *Divider) deleteExpiredWorkers(data *DividerData) {
 	}
 }
 
+//delete node removes the work node that is input
 func (r *Divider) deleteNode(data *DividerData, node string) {
 	//TODO
 
+	//remove the node from the set of update times.
 	e := r.redis.HDel(r.done, r.updateTimeKey, node).Err()
 	if e != nil {
 		r.informer.Errorf("Divider: Error deleting node %s: %s", node, e.Error())
 	}
+	//remove the node from the set of affinities.
 	e = r.redis.HDel(r.done, r.affinityKey, node).Err()
 	if e != nil {
 		r.informer.Errorf("Divider: Error deleting node %s: %s", node, e.Error())
 	}
 }
 
+//delete work that is no longer being processed.
 func (r *Divider) deleteRemovedWork(data *DividerData) {
 	for k := range data.Worker {
 		if _, ok := data.work[k]; !ok {
@@ -493,11 +528,13 @@ func (r *Divider) deleteRemovedWork(data *DividerData) {
 	}
 }
 
+//calculateNodeChanges calculates what work is to be done by each node, and how to change the work from one node to the next.
 func (r *Divider) calculateNodeChanges(data *DividerData) {
 	workCount := len(data.work)
 	workPerAff := float64(workCount) / float64(data.sumAffinity)
 
 	//calculate the total per node, rounding down.
+	//nodeWorkCount is a map[nodeID]workCount so that you can look up how much work node N is assigned.
 	nodeWorkCount := make(map[string]int)
 	total := 0
 	for k, v := range data.affinities {
@@ -505,8 +542,9 @@ func (r *Divider) calculateNodeChanges(data *DividerData) {
 		total += nodeWorkCount[k]
 	}
 
-	//add extra to make sure that the total matches the ammount given.
+	//add remainder to make sure that the total matches the ammount given.
 	toAdd := workCount - total
+	//the order output is based on sorting the divider data deterministically.
 	for _, k := range r.sortNodeChanges(data) {
 		if toAdd == 0 {
 			break
@@ -515,10 +553,15 @@ func (r *Divider) calculateNodeChanges(data *DividerData) {
 		toAdd--
 	}
 
+	if toAdd > 0 {
+		r.informer.Errorf("Unable to assign all work. %d work remaning. work: %d, affinityTotal: %d, workPer: %f, nodeWorkCount %v", toAdd, workCount, data.sumAffinity, workPerAff, nodeWorkCount)
+	}
+
 	//calculate the actual change in each node.
 	for k, v := range nodeWorkCount {
 		c := v - len(data.NodeWork[k])
 		if c != 0 {
+			r.informer.Infof("Node %s has a change in capacity: %d", k, c)
 			data.nodeChange[k] = c
 		}
 	}
@@ -541,11 +584,13 @@ func (r *Divider) sortNodeChanges(data *DividerData) NodeChangesSort {
 	return changes
 }
 
+//NodeChange is a simple object that holds the node's ID and it's affinity.
 type NodeChange struct {
 	uuid     string
 	affinity int64
 }
 
+//NodeChangeSort is used to implement a sorter on NodeChange.
 type NodeChangesSort []NodeChange
 
 func (a NodeChangesSort) Len() int      { return len(a) }
@@ -565,12 +610,17 @@ func (r *Divider) updateNodeWork(data *DividerData) {
 
 	//delete from the NodeWork based on nodeChange.
 	for node, change := range data.nodeChange {
+
+		//only need to delete from node work for nodes that need to loose work
 		if change < 0 {
+			//get the ammount of work that a node has
 			workCount := len(data.NodeWork[node])
+
 			if workCount+change <= 0 {
-				//if there is NO work, because the total change is zero, delete from the list
+				//if there is NO work, because the total change is zero, just delete from the list
 				delete(data.NodeWork, node)
 			} else {
+				//otherwise, just remove the most recently added work.
 				data.NodeWork[node] = data.NodeWork[node][0 : workCount+change]
 			}
 			//delete as it wont be needed for the positive change loop.
@@ -581,7 +631,7 @@ func (r *Divider) updateNodeWork(data *DividerData) {
 	//remove all work from the work list that is currently assigned to a node.
 	for _, workSet := range data.NodeWork {
 		if workSet != nil {
-
+			//for each node, for each item that it has been assigned
 			for _, work := range workSet {
 				delete(data.work, work)
 			}
@@ -599,14 +649,17 @@ func (r *Divider) updateNodeWork(data *DividerData) {
 	for node, change := range data.nodeChange {
 		if change > 0 {
 			for i := 0; i < change; i++ {
+				//if the list of work to assign to that node is null, create it
 				if data.NodeWork[node] == nil {
 					data.NodeWork[node] = make([]string, 0)
 				} //This is erroring because there is no work. There is no WORK because it has already been asigned to another node. for SOME reason tho,
-				data.NodeWork[node] = append(data.NodeWork[node], workArray[workIdx])
+				//add the work to this node, and increase the index to search for the next work.
+				work := workArray[workIdx]
+				data.NodeWork[node] = append(data.NodeWork[node], work)
 				workIdx++
+				//TODO I think I can assign the worker here
+				//data.Worker[work] = node
 			}
-		} else {
-			//TODO error.
 		}
 	}
 }
@@ -629,7 +682,7 @@ type DividerData struct {
 	affinities map[string]int64
 	//sumAffinity is the change in affinity that each node has.
 	sumAffinity int
-	//Worker is map[workId]workerNode
+	//Worker is map[workId]workerNode so that you can look up the worker based on the work
 	Worker map[string]string
 	//NodeWork is a map[workerNode][]work to allow for looking up what work a particular node is working on
 	NodeWork map[string][]string

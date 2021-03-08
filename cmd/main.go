@@ -14,7 +14,6 @@ import (
 
 func main() {
 
-
 	if massTest {
 		siulators()
 	}
@@ -55,7 +54,7 @@ func makeWatcher(print bool, idx int) {
 	// 	fmt.Printf(err.Error())
 	// }
 	// fmt.Printf("CHANNELS %v (%T)\n", res, res)
-	divider = rd.NewDivider(client, keyStr, nil, 10)
+	divider = rd.NewDivider(client, keyStr, "", nil, 10)
 	divider.Start()
 	//divider.SetAffinity(1000)
 	//divider.SetAffinity(2000)
