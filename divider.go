@@ -5,6 +5,7 @@ import (
 )
 
 //Informer is a simple way to pass messages from the Divider to the external system.
+//TODO need to add a debug here likely.
 type Informer interface {
 	Infof(message string, args ...interface{})
 	Errorf(message string, args ...interface{})

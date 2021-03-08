@@ -659,6 +659,8 @@ func (r *Divider) updateNodeWork(data *DividerData) {
 				workIdx++
 				//TODO I think I can assign the worker here
 				//data.Worker[work] = node
+				r.informer.Infof("Added work %s to node %s", work, node)
+				//TODO I can do the math here to add multiple at once.
 			}
 		}
 	}
@@ -667,7 +669,10 @@ func (r *Divider) updateNodeWork(data *DividerData) {
 func (r *Divider) updateWorker(data *DividerData) {
 	for Node, workSet := range data.NodeWork {
 		for _, work := range workSet {
-			data.Worker[work] = Node
+			if data.Worker[work] != Node {
+				data.Worker[work] = Node
+				r.informer.Infof("updated work %s to node %s", work, Node)
+			}
 		}
 	}
 }
