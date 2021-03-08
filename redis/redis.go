@@ -95,7 +95,6 @@ func NewDivider(redis *redis.Client, masterKey, name string, informer divider.In
 //No values should return to the channels without start being called.
 func (r *Divider) Start() {
 	r.mux.Lock()
-	//TODO
 	//make so I cant start multiple times.
 	r.start()
 	r.mux.Unlock()
@@ -212,11 +211,17 @@ func (r *Divider) stop() {
 }
 
 func (r *Divider) close() {
-	r.informer.Infof("Close call unnecessary for Redis Divider.")
+	r.informer.Errorf("Close call unnecessary for Redis Divider.")
 	//Nothing happens here in this particular implementation as the connection to redis is passed in.
 }
 
 func (r *Divider) compareKeys() {
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.informer.Errorf("Forced to recover from panic in compare keys: %v", r)
+		}
+	}()
+
 	//take in the keys from the remote, and compare them to the list of current keys. if there are any changes, pipe them to the listener.
 	newKeys := r.getAssignedProcessingArray()
 	toAdd := make(map[string]bool)
@@ -237,13 +242,13 @@ func (r *Divider) compareKeys() {
 	}
 
 	for key := range toAdd {
-		//TODO make only so that it sends if the chan has been grabbed.
+		//TODO5 make only so that it sends if the chan has been grabbed.
 		r.startChan <- key
 		r.currentKeys[key] = true
 	}
 
 	for key := range toRemove {
-		//TODO make only so that it sends if the chan has been grabbed.
+		//TODO5 make only so that it sends if the chan has been grabbed.
 		r.stopChan <- key
 		delete(r.currentKeys, key)
 	}
@@ -258,7 +263,6 @@ func (r *Divider) watch() {
 //watchForKeys is a function looped to constantly look for new keys that need results output to them.
 func (r *Divider) watchForKeys() {
 
-	//TODO add panic watchers here, to keep the loops running.
 	for {
 		select {
 		case <-time.After(time.Millisecond * 500):
@@ -276,6 +280,7 @@ func (r *Divider) watchForUpdates() {
 		select {
 		case <-time.After(time.Millisecond * 500):
 			r.updateAssignments()
+			r.updatePing()
 		case <-r.done.Done():
 			return
 		}
@@ -285,7 +290,7 @@ func (r *Divider) watchForUpdates() {
 //Internal affinity setting.
 func (r *Divider) setAffinity(Affinity divider.Affinity) {
 	r.informer.Infof("Setting affinity for %s to %d", r.uuid, Affinity)
-	r.redis.HSet(r.done, r.affinityKey, r.uuid, int64(Affinity))
+	r.affinity = Affinity
 }
 
 func (r *Divider) sendStopProcessing(key string) {
@@ -311,8 +316,14 @@ func (r *Divider) getAssignedProcessingArray() []string {
 	return dat.NodeWork[r.uuid]
 }
 
-//updates all assignments if master.
-func (r *Divider) updateAssignments() {
+//updatePing is used to consistently tell the system that the worker is online, and listening to work.
+func (r *Divider) updatePing() {
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.informer.Errorf("Forced to recover from panic in update Ping: %v", r)
+		}
+	}()
+
 	r.redis.HSet(r.done, r.updateTimeKey, r.uuid, time.Now().UnixNano())
 
 	//set the master key to this value if it does not exist.
@@ -324,6 +335,19 @@ func (r *Divider) updateAssignments() {
 	if set {
 		r.informer.Infof("The master was set to this node: %s", r.uuid)
 	}
+
+	r.redis.HSet(r.done, r.affinityKey, r.uuid, int64(r.affinity))
+
+}
+
+//updates all assignments if master.
+func (r *Divider) updateAssignments() {
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			r.informer.Errorf("Forced to recover from panic in update Assignments: %v", r)
+		}
+	}()
 
 	//check the master key.
 	master, err := r.redis.Get(r.done, r.masterKey).Result()
@@ -507,7 +531,6 @@ func (r *Divider) deleteExpiredWorkers(data *DividerData) {
 
 //delete node removes the work node that is input
 func (r *Divider) deleteNode(data *DividerData, node string) {
-	//TODO
 
 	//remove the node from the set of update times.
 	r.informer.Infof("removing node %s from update times.", node)
@@ -573,7 +596,6 @@ func (r *Divider) calculateNodeChanges(data *DividerData) {
 
 //make it so that items with the same affinity have nodes assigned to them in order.
 func (r *Divider) sortNodeChanges(data *DividerData) NodeChangesSort {
-	//TODO sort the nodeChange based A: the
 	changes := make(NodeChangesSort, 0)
 	//different affinities should have, at most one difference in count
 
@@ -661,10 +683,10 @@ func (r *Divider) updateNodeWork(data *DividerData) {
 				work := workArray[workIdx]
 				data.NodeWork[node] = append(data.NodeWork[node], work)
 				workIdx++
-				//TODO I think I can assign the worker here
+				//TODO2 I think I can assign the worker here
 				//data.Worker[work] = node
-				r.informer.Infof("Added work %s to node %s", work, node)
-				//TODO I can do the math here to add multiple at once.
+				r.informer.Debugf("Added work %s to node %s", work, node)
+				//TODO3 I can do the math here to add multiple at once.
 			}
 		}
 	}
@@ -675,7 +697,7 @@ func (r *Divider) updateWorker(data *DividerData) {
 		for _, work := range workSet {
 			if data.Worker[work] != Node {
 				data.Worker[work] = Node
-				r.informer.Infof("updated work %s to node %s", work, Node)
+				r.informer.Debugf("updated work %s to node %s", work, Node)
 			}
 		}
 	}

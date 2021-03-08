@@ -9,6 +9,7 @@ import (
 type Informer interface {
 	Infof(message string, args ...interface{})
 	Errorf(message string, args ...interface{})
+	Debugf(message string, args ...interface{})
 }
 
 //Divider provides a very simple method of getting and sending start and stop orders
@@ -75,14 +76,19 @@ type Affinity int64
 //DefaultLogger is a quick and dirty logger that matches the Informer interface.
 type DefaultLogger struct{}
 
-//Infof for the DefaultLogger prints the message to the deafult output
+//Infof for the DefaultLogger prints the message to the deafult output with the prefex "INFO  :
 func (d DefaultLogger) Infof(message string, args ...interface{}) {
-	fmt.Printf("%s\n", fmt.Sprintf(message, args...))
+	fmt.Printf("INFO : %s\n", fmt.Sprintf(message, args...))
 }
 
-//Errorf for the DefaultLogger prints the message to the deafult output with the prefex "ERROR :"
+//Errorf for the DefaultLogger prints the message to the deafult output with the prefex "ERROR:"
 func (d DefaultLogger) Errorf(message string, args ...interface{}) {
 	fmt.Printf("ERROR: %s\n", fmt.Sprintf(message, args...))
+}
+
+//Debugf for the DefaultLogger prints the message to the deafult output with the prefex "DEBUG:"
+func (d DefaultLogger) Debugf(message string, args ...interface{}) {
+	fmt.Printf("DEBUG: %s\n", fmt.Sprintf(message, args...))
 }
 
 //EmptyLogger is a quick and dirty logger that prints nothing, which matches the Informer interface.
