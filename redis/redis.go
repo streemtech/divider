@@ -258,6 +258,7 @@ func (r *Divider) watch() {
 //watchForKeys is a function looped to constantly look for new keys that need results output to them.
 func (r *Divider) watchForKeys() {
 
+	//TODO add panic watchers here, to keep the loops running.
 	for {
 		select {
 		case <-time.After(time.Millisecond * 500):
@@ -283,6 +284,7 @@ func (r *Divider) watchForUpdates() {
 
 //Internal affinity setting.
 func (r *Divider) setAffinity(Affinity divider.Affinity) {
+	r.informer.Infof("Setting affinity for %s to %d", r.uuid, Affinity)
 	r.redis.HSet(r.done, r.affinityKey, r.uuid, int64(Affinity))
 }
 
@@ -508,11 +510,13 @@ func (r *Divider) deleteNode(data *DividerData, node string) {
 	//TODO
 
 	//remove the node from the set of update times.
+	r.informer.Infof("removing node %s from update times.", node)
 	e := r.redis.HDel(r.done, r.updateTimeKey, node).Err()
 	if e != nil {
 		r.informer.Errorf("Divider: Error deleting node %s: %s", node, e.Error())
 	}
 	//remove the node from the set of affinities.
+	r.informer.Infof("removing affinity for %s", node)
 	e = r.redis.HDel(r.done, r.affinityKey, node).Err()
 	if e != nil {
 		r.informer.Errorf("Divider: Error deleting node %s: %s", node, e.Error())

@@ -1,6 +1,7 @@
 name: Go
 
 on:
+  #renamed to main
   push:
     branches: [master]
   pull_request:
