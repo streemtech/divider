@@ -36,22 +36,23 @@ type Divider struct {
 	//affinityKey is a string stored after <key>:__meta:affinity. It is a set that holds the last update times of all nodes. It is used to determine what nodes have offlined.
 	affinityKey string
 
-	affinity    divider.Affinity
-	mux         *sync.Mutex
-	startChan   chan string
-	stopChan    chan string
-	done        context.Context
-	doneCancel  context.CancelFunc
-	uuid        string
-	currentKeys map[string]bool
-	informer    divider.Informer
-	timeout     int // number of seconds to time out at.
+	affinity      divider.Affinity
+	mux           *sync.Mutex
+	startChan     chan string
+	stopChan      chan string
+	done          context.Context
+	doneCancel    context.CancelFunc
+	uuid          string
+	currentKeys   map[string]bool
+	informer      divider.Informer
+	timeout       int // number of seconds to time out at.
+	masterTimeout int //timeout that the master can be gone for.
 }
 
 //NewDivider returns a Divider using the Go-Redis library as a backend.
 //The keys beginning in <masterKey>:__meta are used to keep track of the different metainformation to
 //:* is appended automatically!!
-func NewDivider(redis *redis.Client, masterKey, name string, informer divider.Informer, timeout int) *Divider {
+func NewDivider(redis *redis.Client, masterKey, name string, informer divider.Informer, timeout, masterTimeout int) *Divider {
 	var i divider.Informer
 	if informer == nil {
 		i = divider.DefaultLogger{}
@@ -64,6 +65,12 @@ func NewDivider(redis *redis.Client, masterKey, name string, informer divider.In
 		t = 10
 	} else {
 		t = timeout
+	}
+
+	if masterTimeout <= 0 {
+		t = 10
+	} else {
+		t = masterTimeout
 	}
 
 	//set the UUID.
@@ -91,6 +98,7 @@ func NewDivider(redis *redis.Client, masterKey, name string, informer divider.In
 		uuid:          UUID,
 		informer:      i,
 		timeout:       t,
+		masterTimeout: masterTimeout,
 	}
 
 	return d
@@ -333,7 +341,7 @@ func (r *Divider) updatePing() {
 	r.redis.HSet(r.done, r.updateTimeKey, r.uuid, time.Now().UnixNano())
 
 	//set the master key to this value if it does not exist.
-	set, err := r.redis.SetNX(r.done, r.masterKey, r.uuid, time.Second*3000).Result()
+	set, err := r.redis.SetNX(r.done, r.masterKey, r.uuid, time.Second*time.Duration(r.masterTimeout)).Result()
 	if err != nil {
 		r.informer.Errorf("update if master does not exist error: %s!", err.Error())
 		return
@@ -364,7 +372,7 @@ func (r *Divider) updateAssignments() {
 
 	//if this is the master, run the update (setting the timeout to 3 seconds)
 	if master == r.uuid {
-		_, err = r.redis.Set(r.done, r.masterKey, r.uuid, time.Second*3000).Result()
+		_, err = r.redis.Set(r.done, r.masterKey, r.uuid, time.Second*time.Duration(r.masterTimeout)).Result()
 		if err != nil {
 			r.informer.Errorf("update master timeout error: %s!", err.Error())
 			return
