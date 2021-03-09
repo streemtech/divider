@@ -14,11 +14,33 @@ import (
 
 func main() {
 
-	if massTest {
-		siulators()
+	// if massTest {
+	// 	siulators()
+	// }
+
+	// makeWatcher(false, -1)
+
+	client := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "Password1234", // no password set
+		DB:       0,              // use default DB
+	})
+
+	// res, err := client.PubSubChannels(context.TODO(), "poll:*").Result()
+	// if err != nil && err.Error() != "redis: nil" {
+	// 	fmt.Printf(err.Error())
+	// }
+	// fmt.Printf("CHANNELS %v (%T)\n", res, res)
+	d1 := rd.NewDivider(client, keyStr, "", divider.DefaultLogger{}, 10)
+	d1.Start()
+	time.Sleep(time.Millisecond * 100)
+	d2 := rd.NewDivider(client, keyStr, "", divider.DefaultLogger{}, 10)
+	d2.Start()
+
+	for {
+		time.Sleep(time.Hour)
 	}
 
-	makeWatcher(false, -1)
 }
 
 var massTest = true

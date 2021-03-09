@@ -72,6 +72,11 @@ func NewDivider(redis *redis.Client, masterKey, name string, informer divider.In
 		UUID = uuid.New().String()
 	}
 
+	status, err := redis.Ping(context.TODO()).Result()
+	if err != nil {
+		informer.Errorf("ping error: %s", err.Error())
+	}
+	informer.Infof("Ping status result: %s", status)
 	d := &Divider{
 		redis:         redis,
 		searchKey:     masterKey + ":*",
@@ -267,6 +272,7 @@ func (r *Divider) watchForKeys() {
 		select {
 		case <-time.After(time.Millisecond * 500):
 			r.compareKeys()
+			r.updatePing()
 		case <-r.done.Done():
 			return
 		}
@@ -327,7 +333,7 @@ func (r *Divider) updatePing() {
 	r.redis.HSet(r.done, r.updateTimeKey, r.uuid, time.Now().UnixNano())
 
 	//set the master key to this value if it does not exist.
-	set, err := r.redis.SetNX(r.done, r.masterKey, r.uuid, time.Second*3).Result()
+	set, err := r.redis.SetNX(r.done, r.masterKey, r.uuid, time.Second*3000).Result()
 	if err != nil {
 		r.informer.Errorf("update if master does not exist error: %s!", err.Error())
 		return
@@ -358,7 +364,7 @@ func (r *Divider) updateAssignments() {
 
 	//if this is the master, run the update (setting the timeout to 3 seconds)
 	if master == r.uuid {
-		_, err = r.redis.Set(r.done, r.masterKey, r.uuid, time.Second*3).Result()
+		_, err = r.redis.Set(r.done, r.masterKey, r.uuid, time.Second*3000).Result()
 		if err != nil {
 			r.informer.Errorf("update master timeout error: %s!", err.Error())
 			return
@@ -490,7 +496,6 @@ func (r *Divider) calculateData(old *DividerData) (new *DividerData, err error) 
 	}
 	r.calculateNodeChanges(new)
 	r.updateNodeWork(new)
-	r.updateWorker(new)
 
 	return new, nil
 }
@@ -572,14 +577,20 @@ func (r *Divider) calculateNodeChanges(data *DividerData) {
 	//add remainder to make sure that the total matches the ammount given.
 	toAdd := workCount - total
 	//the order output is based on sorting the divider data deterministically.
-	for _, k := range r.sortNodeChanges(data) {
+
+	if toAdd > len(data.NodeWork) {
+		r.informer.Errorf("")
+	}
+
+	sorted := r.sortNodeChanges(data)
+	//fmt.Printf("%v", sorted)
+	for _, k := range sorted {
 		if toAdd == 0 {
 			break
 		}
 		nodeWorkCount[k.uuid]++
 		toAdd--
 	}
-
 	if toAdd > 0 {
 		r.informer.Errorf("Unable to assign all work. %d work remaning. work: %d, affinityTotal: %d, workPer: %f, nodeWorkCount %v", toAdd, workCount, data.sumAffinity, workPerAff, nodeWorkCount)
 	}
@@ -588,18 +599,22 @@ func (r *Divider) calculateNodeChanges(data *DividerData) {
 	for k, v := range nodeWorkCount {
 		c := v - len(data.NodeWork[k])
 		if c != 0 {
-			r.informer.Infof("Node %s has a change in capacity: %d", k, c)
+			r.informer.Debugf("Node %s has a change in capacity: %d", k, c)
 			data.nodeChange[k] = c
 		}
 	}
+
 }
+
+//TODO there is still a bug where the work is not getting set.
+//The work is getting a node assigned, but it is not getting assigned to the node's work list then.
 
 //make it so that items with the same affinity have nodes assigned to them in order.
 func (r *Divider) sortNodeChanges(data *DividerData) NodeChangesSort {
 	changes := make(NodeChangesSort, 0)
 	//different affinities should have, at most one difference in count
 
-	for k := range data.NodeWork {
+	for k := range data.affinities {
 		changes = append(changes, NodeChange{
 			affinity: data.affinities[k],
 			uuid:     k,
@@ -683,21 +698,8 @@ func (r *Divider) updateNodeWork(data *DividerData) {
 				work := workArray[workIdx]
 				data.NodeWork[node] = append(data.NodeWork[node], work)
 				workIdx++
-				//TODO2 I think I can assign the worker here
-				//data.Worker[work] = node
+				data.Worker[work] = node
 				r.informer.Debugf("Added work %s to node %s", work, node)
-				//TODO3 I can do the math here to add multiple at once.
-			}
-		}
-	}
-}
-
-func (r *Divider) updateWorker(data *DividerData) {
-	for Node, workSet := range data.NodeWork {
-		for _, work := range workSet {
-			if data.Worker[work] != Node {
-				data.Worker[work] = Node
-				r.informer.Debugf("updated work %s to node %s", work, Node)
 			}
 		}
 	}
