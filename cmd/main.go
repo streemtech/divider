@@ -31,10 +31,10 @@ func main() {
 	// 	fmt.Printf(err.Error())
 	// }
 	// fmt.Printf("CHANNELS %v (%T)\n", res, res)
-	d1 := rd.NewDivider(client, keyStr, "", divider.DefaultLogger{}, 10)
+	d1 := rd.NewDivider(client, keyStr, "", divider.DefaultLogger{}, 10, 3)
 	d1.Start()
 	time.Sleep(time.Millisecond * 100)
-	d2 := rd.NewDivider(client, keyStr, "", divider.DefaultLogger{}, 10)
+	d2 := rd.NewDivider(client, keyStr, "", divider.DefaultLogger{}, 10, 3)
 	d2.Start()
 
 	for {
@@ -76,7 +76,7 @@ func makeWatcher(print bool, idx int) {
 	// 	fmt.Printf(err.Error())
 	// }
 	// fmt.Printf("CHANNELS %v (%T)\n", res, res)
-	divider = rd.NewDivider(client, keyStr, "", nil, 10)
+	divider = rd.NewDivider(client, keyStr, "", nil, 10, 3)
 	divider.Start()
 	//divider.SetAffinity(1000)
 	//divider.SetAffinity(2000)
