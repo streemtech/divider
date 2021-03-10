@@ -6,12 +6,14 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/streemtech/divider"
 
+	cache "github.com/go-redis/cache/v8"
 	redis "github.com/go-redis/redis/v8"
 )
 
@@ -19,7 +21,8 @@ import (
 
 //Divider is a redis backed implementation of divider.Divider. The
 type Divider struct {
-	redis *redis.Client
+	redis      *redis.Client
+	redisCache *cache.Cache
 
 	//searchKey     is the key that is searched, <key>:* that
 	searchKey string
@@ -390,6 +393,7 @@ func (r *Divider) updateAssignments() {
 }
 
 //updateData does the work to keep track of the work distribution.
+//This work should only be done by the master.
 func (r *Divider) updateData() error {
 	//check if the info exists or not.
 	i, err := r.redis.Exists(r.done, r.infoKey).Result()
@@ -729,4 +733,183 @@ type DividerData struct {
 	NodeWork map[string][]string
 	//nodeChanges is the map[workerNode]change that calculates how many nodes the
 	nodeChange map[string]int
+}
+
+type NodeCountChange struct {
+	Node        string
+	ChangeCount int
+}
+
+//NodeCountChangesSort is used to implement a sorter on NodeChange.
+type NodeCountChangesSort []NodeCountChange
+
+func (a NodeCountChangesSort) Len() int      { return len(a) }
+func (a NodeCountChangesSort) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+func (a NodeCountChangesSort) Less(i, j int) bool {
+	if a[i].ChangeCount > a[j].ChangeCount {
+		return true
+	}
+	if a[i].ChangeCount < a[j].ChangeCount {
+		return false
+	}
+	return strings.Compare(a[i].Node, a[j].Node) > 0
+}
+
+//DividerData2 is a backup of the dividerData
+type DividerData2 struct {
+	//Worker is map[workId]workerNode so that you can look up the worker based on the work
+	Worker map[string]string
+	//NodeWork is a map[workerNode]map[work]true to allow for looking up what work a particular node is working on
+	NodeWork map[string]map[string]bool
+}
+
+func (r *DividerData2) calculateNewWork(workList, nodeList []string, affinities map[string]int) {
+	nodesToRemove := r.getNodesToRemove(nodeList)
+	for _, v := range nodesToRemove {
+		r.removeNode(v)
+	}
+
+	workToAdd, workToRemove := r.getWorkToAddAndRemove(workList)
+
+	for _, v := range workToRemove {
+		r.removeWork(v)
+	}
+
+	//changes is a map of []{node,change} (sorted based on the change count from highest to lowest)
+	//changes does not contain any changes that are less than 1.
+	changes := r.calculateWorkCountChange(affinities, len(workList))
+
+	//applyWorkToNodes goes through the list of changes
+	r.applyWorkToNodes(changes, workToAdd)
+}
+
+func (r *DividerData2) applyWorkToNodes(changes []NodeCountChange, workToAdd map[string]string) {
+
+	count := len(r.NodeWork)
+	if count == 0 {
+		return
+	}
+	changesIDX := 0
+	for work := range workToAdd {
+		index := changesIDX % count
+
+		r.addWorkToNode(work, changes[index].Node)
+		changes[index].ChangeCount--
+
+		if changes[index].ChangeCount <= 0 {
+			changesIDX++
+		}
+	}
+
+}
+
+func (r *DividerData2) calculateWorkCountChange(affinities map[string]int, workCount int) (changes []NodeCountChange) {
+	changes = make([]NodeCountChange, 0)
+	sum := 0
+	for _, v := range affinities {
+		if v < 0 {
+			continue
+		}
+		sum += v
+	}
+
+	workPerAff := float64(workCount) / float64(sum)
+
+	//calculate the total per node, rounding down.
+	//nodeWorkCount is a map[nodeID]workCount so that you can look up how much work node N is assigned.
+	nodeWorkCount := make(map[string]int)
+	total := 0
+	for k, v := range affinities {
+		nodeWorkCount[k] = int(math.Floor(float64(v) * workPerAff))
+		total += nodeWorkCount[k]
+	}
+
+	for node, ExpectedWorkCount := range nodeWorkCount {
+		currentWorkCount := len(r.NodeWork[node])
+		change := ExpectedWorkCount - currentWorkCount
+		if change > 0 {
+			changes = append(changes, NodeCountChange{
+				Node:        node,
+				ChangeCount: change,
+			})
+		}
+	}
+
+	sort.Sort(NodeCountChangesSort(changes))
+	return changes
+}
+
+func (r *DividerData2) getWorkToAddAndRemove(workList []string) (toAdd, toRemove map[string]string) {
+	toAdd = make(map[string]string)
+	toRemove = make(map[string]string)
+	workMap := make(map[string]string)
+
+	//loop through the list of work
+	for _, work := range workList {
+		workMap[work] = work
+
+		//if the work is not currently assigned, add to the list of work to add
+		_, ok := r.Worker[work]
+		if !ok {
+			toAdd[work] = work
+		}
+	}
+
+	//loop through all work currently assigned,
+	for _, work := range r.Worker {
+
+		//if the work is NOT in the list of work, add it to the list to remove.
+		_, ok := workMap[work]
+		if !ok {
+			toRemove[work] = work
+		}
+	}
+	return toAdd, toRemove
+}
+
+func (r *DividerData2) getNodesToRemove(nodeList []string) (toRemove map[string]string) {
+	toRemove = make(map[string]string)
+	for _, node := range nodeList {
+		_, ok := r.NodeWork[node]
+		if !ok {
+			toRemove[node] = node
+		}
+	}
+	return toRemove
+}
+
+func (r *DividerData2) addWorkToNode(workID, nodeID string) {
+	r.NodeWork[nodeID][workID] = true
+	r.Worker[workID] = nodeID
+}
+func (r *DividerData2) removeWorkFromNode(workID, nodeID string) {
+	delete(r.Worker, workID)
+	delete(r.NodeWork[nodeID], workID)
+}
+func (r *DividerData2) removeNode(nodeID string) {
+	for work := range r.NodeWork[nodeID] {
+		r.removeWorkFromNode(work, nodeID)
+	}
+	delete(r.NodeWork, nodeID)
+}
+func (r *DividerData2) addNode(nodeID string) {
+	r.NodeWork[nodeID] = make(map[string]bool)
+}
+func (r *DividerData2) removeWork(workID string) {
+	r.removeWorkFromNode(workID, r.Worker[workID])
+	delete(r.Worker, workID)
+}
+
+func (r *DividerData2) removeItemsFromNode(nodeID string, items int) (removed []string) {
+	removed = make([]string, items)
+	idx := 0
+	for work := range r.NodeWork[nodeID] {
+		if idx >= items {
+			return removed
+		}
+		removed[idx] = work
+		r.removeWorkFromNode(work, nodeID)
+		idx++
+	}
+	return removed
 }
