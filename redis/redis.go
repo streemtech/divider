@@ -63,7 +63,7 @@ func NewDivider(redis *redis.Client, masterKey, name string, informer divider.In
 		i = informer
 	}
 	var t int
-
+	var mt int
 	if timeout <= 0 {
 		t = 10
 	} else {
@@ -71,9 +71,9 @@ func NewDivider(redis *redis.Client, masterKey, name string, informer divider.In
 	}
 
 	if masterTimeout <= 0 {
-		t = 10
+		mt = 10
 	} else {
-		t = masterTimeout
+		mt = masterTimeout
 	}
 
 	//set the UUID.
@@ -105,7 +105,7 @@ func NewDivider(redis *redis.Client, masterKey, name string, informer divider.In
 		uuid:          UUID,
 		informer:      i,
 		timeout:       t,
-		masterTimeout: masterTimeout,
+		masterTimeout: mt,
 		JSON:          true,
 	}
 
@@ -463,7 +463,12 @@ func (r *Divider) updateData() error {
 		return err
 	}
 
-	data.calculateNewWork(work, nodeList, affinities, timeoutList)
+	workList := make(map[string]string)
+	for _, v := range work {
+		workList[v] = v
+	}
+
+	data.calculateNewWork(workList, nodeList, affinities, timeoutList)
 
 	return r.setInfo(data)
 
@@ -556,8 +561,8 @@ type DividerData struct {
 	divider *Divider
 }
 
-func (r *DividerData) calculateNewWork(workList []string, nodeList, affinities, timeoutList map[string]int64) {
-	nodesToRemove := r.getNodesToRemove(nodeList, affinities, timeoutList)
+func (r *DividerData) calculateNewWork(workList map[string]string, nodeList, affinities, timeoutList map[string]int64) {
+	nodesToRemove, orphanedWork := r.getNodesToRemove(nodeList, affinities, timeoutList, workList)
 	for _, v := range nodesToRemove {
 		r.removeNode(v)
 	}
@@ -568,6 +573,10 @@ func (r *DividerData) calculateNewWork(workList []string, nodeList, affinities, 
 	workToAdd, workToRemove := r.getWorkToAddAndRemove(workList)
 
 	for _, v := range workToRemove {
+		r.removeWork(v)
+	}
+
+	for _, v := range orphanedWork {
 		r.removeWork(v)
 	}
 
@@ -621,14 +630,16 @@ func (r *DividerData) calculateWorkCountChange(nodeList, affinities map[string]i
 	nodeWorkCount := make(map[string]int)
 	total := 0
 	for k, v := range affinities {
+		//if not in the live node list, skip.
 		_, ok := nodeList[k]
 		if !ok {
 			continue
 		}
-		nodeWorkCount[k] = int(math.Floor(float64(v) * workPerAff))
+		nodeWorkCount[k] = int(math.Ceil(float64(v) * workPerAff))
 		total += nodeWorkCount[k]
 	}
 
+	//Had 4 work, 4 assigned to each of the current nodes.
 	for node, ExpectedWorkCount := range nodeWorkCount {
 		currentWorkCount := len(r.NodeWork[node])
 		change := ExpectedWorkCount - currentWorkCount
@@ -644,14 +655,13 @@ func (r *DividerData) calculateWorkCountChange(nodeList, affinities map[string]i
 	return changes
 }
 
-func (r *DividerData) getWorkToAddAndRemove(workList []string) (toAdd, toRemove map[string]string) {
+func (r *DividerData) getWorkToAddAndRemove(workList map[string]string) (toAdd, toRemove map[string]string) {
 	toAdd = make(map[string]string)
 	toRemove = make(map[string]string)
-	workMap := make(map[string]string)
 
 	//loop through the list of work
 	for _, work := range workList {
-		workMap[work] = work
+		//workMap[work] = work
 
 		//if the work is not currently assigned, add to the list of work to add
 		_, ok := r.Worker[work]
@@ -661,10 +671,10 @@ func (r *DividerData) getWorkToAddAndRemove(workList []string) (toAdd, toRemove 
 	}
 
 	//loop through all work currently assigned,
-	for _, work := range r.Worker {
+	for work, _ := range r.Worker {
 
 		//if the work is NOT in the list of work, add it to the list to remove.
-		_, ok := workMap[work]
+		_, ok := workList[work]
 		if !ok {
 			toRemove[work] = work
 		}
@@ -672,28 +682,35 @@ func (r *DividerData) getWorkToAddAndRemove(workList []string) (toAdd, toRemove 
 	return toAdd, toRemove
 }
 
-func (r *DividerData) getNodesToRemove(nodeList, affinities, timeoutList map[string]int64) (toRemove map[string]string) {
+func (r *DividerData) getNodesToRemove(nodeList, affinities, timeoutList map[string]int64, workList map[string]string) (toRemove, orphanedWork map[string]string) {
 	//nodeList is the list of nodes that are confirmed good.
 	//affinities are the nodes that are in the affinities set.
 
 	//getNodesToRemove needs the list of nodes that are no longer in the node list, but have an affinity
-
-	//check worker for any nodes that are not in the list.
+	orphanedWork = make(map[string]string)
 	toRemove = make(map[string]string)
 
-	for _, node := range r.Worker {
+	//check worker for any nodes that are not in the list.
+	for work, node := range r.Worker {
 		_, ok := nodeList[node]
 		if !ok {
+			orphanedWork[work] = work
 			toRemove[node] = node
+		}
+		_, ok = workList[work]
+		if !ok {
+			orphanedWork[work] = work
 		}
 	}
 
+	//go through the list of affinities and remove any nodes that are not in the list.
 	for node := range affinities {
 		_, ok := nodeList[node]
 		if !ok {
 			toRemove[node] = node
 		}
 	}
+
 	for node := range timeoutList {
 		_, ok := nodeList[node]
 		if !ok {
@@ -701,7 +718,7 @@ func (r *DividerData) getNodesToRemove(nodeList, affinities, timeoutList map[str
 		}
 	}
 
-	return toRemove
+	return toRemove, orphanedWork
 }
 
 func (r *DividerData) addWorkToNode(workID, nodeID string) {
@@ -713,7 +730,9 @@ func (r *DividerData) addWorkToNode(workID, nodeID string) {
 }
 func (r *DividerData) removeWorkFromNode(workID, nodeID string) {
 	delete(r.Worker, workID)
-	delete(r.NodeWork[nodeID], workID)
+	if r.NodeWork[nodeID] != nil {
+		delete(r.NodeWork[nodeID], workID)
+	}
 }
 func (r *DividerData) removeNode(nodeID string) {
 	for work := range r.NodeWork[nodeID] {
