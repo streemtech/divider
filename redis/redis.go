@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -50,11 +51,15 @@ type Divider struct {
 	timeout       int // number of seconds to time out at.
 	masterTimeout int //timeout that the master can be gone for.
 	JSON          bool
+
+	workFetcher divider.WorkFetcher
 }
 
 //NewDivider returns a Divider using the Go-Redis library as a backend.
-//The keys beginning in <masterKey>:__meta are used to keep track of the different metainformation to
-//:* is appended automatically!!
+//The keys beginning in <masterKey>:__meta are used to keep track of the different
+//metainformation to divide the work.
+//
+//:* is appended automatically to the work when using default work fetcher.!!
 func NewDivider(redis *redis.Client, masterKey, name string, informer divider.Informer, timeout, masterTimeout int) *Divider {
 	var i divider.Informer
 	if informer == nil {
@@ -108,8 +113,20 @@ func NewDivider(redis *redis.Client, masterKey, name string, informer divider.In
 		masterTimeout: mt,
 		JSON:          true,
 	}
+	d.workFetcher = func(ctx context.Context, key string) ([]string, error) {
+		return d.redis.PubSubChannels(d.done, d.searchKey).Result()
+	}
 
 	return d
+}
+
+//SetWorkFetcher tells the deivider how to look up the list of work that needs to be done.
+func (r *Divider) SetWorkFetcher(f divider.WorkFetcher) error {
+	if f == nil {
+		return fmt.Errorf("work divider can not be nill")
+	}
+	r.workFetcher = f
+	return nil
 }
 
 //Start is the trigger to make the divider begin checking for keys, and returning those keys to the channels.
@@ -391,7 +408,6 @@ func (r *Divider) updateAssignments() {
 		}
 
 	}
-	return
 
 }
 
@@ -456,8 +472,8 @@ func (r *Divider) updateData() error {
 		}
 	}
 
-	//get most up to date list of subscriptions.
-	work, err := r.redis.PubSubChannels(r.done, r.searchKey).Result()
+	//get most up to date list of subscriptions
+	work, err := r.workFetcher(r.done, r.searchKey)
 	if err != nil {
 		r.informer.Errorf("Unable to get list of work : %s", err.Error())
 		return err

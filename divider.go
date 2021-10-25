@@ -1,6 +1,7 @@
 package divider
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -101,3 +102,8 @@ func (d EmptyLogger) Infof(message string, args ...interface{}) {
 //Errorf for the EmptyLogger prints nothing
 func (d EmptyLogger) Errorf(message string, args ...interface{}) {
 }
+
+//WorkFetcher is the function that is expected to be called to determine what work should be done.
+//For cases where determining the work is expected to take a long time, WorkFetcher should just return the data that has been fetched by another function.
+//While this may cause delay in work being applied, it will prevent master thrashing.
+type WorkFetcher func(r context.Context, key string) ([]string, error)
