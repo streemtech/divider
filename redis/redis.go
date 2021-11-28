@@ -333,7 +333,7 @@ func (r *Divider) setAffinity(Affinity divider.Affinity) {
 }
 
 func (r *Divider) sendStopProcessing(key string) {
-
+	//TODO1 implement sendStopProcessing as a way for this node to say I am done.
 }
 
 func (r *Divider) getAssignedProcessingArray() []string {
