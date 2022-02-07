@@ -21,7 +21,8 @@ import (
 
 //Divider is a redis backed implementation of divider.Divider. The
 type Divider struct {
-	redis      *redis.Client
+	redis redis.UniversalClient
+	redis.Client
 	redisCache *cache.Cache
 
 	//searchKey     is the key that is searched, <key>:* that
@@ -60,7 +61,7 @@ type Divider struct {
 //metainformation to divide the work.
 //
 //:* is appended automatically to the work when using default work fetcher.!!
-func NewDivider(redis *redis.Client, masterKey, name string, informer divider.Informer, timeout, masterTimeout int) *Divider {
+func NewDivider(r redis.UniversalClient, masterKey, name string, informer divider.Informer, timeout, masterTimeout int) *Divider {
 	var i divider.Informer
 	if informer == nil {
 		i = divider.DefaultLogger{}
@@ -87,14 +88,14 @@ func NewDivider(redis *redis.Client, masterKey, name string, informer divider.In
 		UUID = uuid.New().String()
 	}
 
-	status, err := redis.Ping(context.TODO()).Result()
+	status, err := r.Ping(context.TODO()).Result()
 	if err != nil {
 		informer.Errorf("ping error: %s", err.Error())
 	}
 	informer.Infof("Ping status result: %s", status)
 
 	d := &Divider{
-		redis: redis,
+		redis: r,
 		// redisCache: cache.New(&cache.Options{
 		// 	Redis: redis,
 		// }),
@@ -382,7 +383,7 @@ func (r *Divider) updateAssignments() {
 
 	defer func() {
 		if rec := recover(); rec != nil {
-			r.informer.Errorf("Forced to recover from panic in update Assignments: %v", r)
+			r.informer.Errorf("Forced to recover from panic in update Assignments: %+v: %+v", r, rec)
 		}
 	}()
 
