@@ -21,8 +21,7 @@ import (
 
 //Divider is a redis backed implementation of divider.Divider. The
 type Divider struct {
-	redis redis.UniversalClient
-	redis.Client
+	redis      redis.UniversalClient
 	redisCache *cache.Cache
 
 	//searchKey     is the key that is searched, <key>:* that
