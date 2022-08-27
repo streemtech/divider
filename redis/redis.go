@@ -55,6 +55,8 @@ type Divider struct {
 	workFetcher divider.WorkFetcher
 }
 
+var _ divider.Divider = (*Divider)(nil)
+
 //NewDivider returns a Divider using the Go-Redis library as a backend.
 //The keys beginning in <masterKey>:__meta are used to keep track of the different
 //metainformation to divide the work.
@@ -112,9 +114,6 @@ func NewDivider(r redis.UniversalClient, masterKey, name string, informer divide
 		timeout:       t,
 		masterTimeout: mt,
 		JSON:          true,
-	}
-	d.workFetcher = func(ctx context.Context, key string) ([]string, error) {
-		return d.redis.PubSubChannels(d.done, d.searchKey).Result()
 	}
 
 	return d
@@ -471,13 +470,12 @@ func (r *Divider) updateData() error {
 			r.informer.Errorf("Unable to convert %s to affinity for node %s", v, k)
 		}
 	}
+	if r.workFetcher == nil {
+		return nil
+	}
 
 	//get most up to date list of subscriptions
-	work, err := r.workFetcher(r.done, r.searchKey)
-	if err != nil {
-		r.informer.Errorf("Unable to get list of work : %s", err.Error())
-		return err
-	}
+	work := r.workFetcher(r.done)
 
 	workList := make(map[string]string)
 	for _, v := range work {

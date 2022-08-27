@@ -28,9 +28,6 @@ type Divider interface {
 	//If called before flushed, processing keys will be timed out instead of released.
 	Close()
 
-	//StopAndClose is a simple helper to call Stop and Close.
-	StopAndClose()
-
 	//GetAssignedProcessingArray returns a string array that represents the keys that this node is set to process.
 	GetAssignedProcessingArray() []string
 
@@ -44,25 +41,12 @@ type Divider interface {
 	//This particular channel is for receiving keys that this node is to stop processing.
 	GetReceiveStopProcessingChan() <-chan string
 
-	//ConfirmStopProcessing takes in a string of a key that this node is no longer processing.
-	//This is to be used to confirm that the processing has stopped for a key gotten from the GetReceiveStopProcessingChan channel.
-	//To manually release processing of a key, use SendStopProcessing instead.
-	//ConfirmStopProcessing is expected to be required for the proper implementation of Flush()
-	ConfirmStopProcessing(string)
-
-	//SendStopProcessing takes in a string of a key that this node is no longer processing.
+	//StopProcessing takes in a string of a key that this node is no longer processing.
 	//This is to be used to release the processing to another node.
-	//To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
-	SendStopProcessing(string)
+	StopProcessing(string) error
 
-	//SetAffinity allows for the affinity to be set by the node so that some controll can be implemented over what nodes receive work.
-	SetAffinity(Affinity)
-	//GetAffinity returns the current affinity. Most cases that use get and then Set affinity would be better off using AlterAffinity.
-	GetAffinity() Affinity
-
-	//AlterAffinity takes in an integer and increases the current affinity by that amount.
-	//This method of updating the affinity should be implemented as concurrency safe.
-	AlterAffinity(Affinity)
+	//StartProcessing adds this key to the list of work to be completed.
+	StartProcessing(string) error
 }
 
 //Affinity is an int64 that allows for the nodes to distribute work
@@ -106,4 +90,4 @@ func (d EmptyLogger) Errorf(message string, args ...interface{}) {
 //WorkFetcher is the function that is expected to be called to determine what work should be done.
 //For cases where determining the work is expected to take a long time, WorkFetcher should just return the data that has been fetched by another function.
 //While this may cause delay in work being applied, it will prevent master thrashing.
-type WorkFetcher func(r context.Context, key string) ([]string, error)
+type WorkFetcher func(r context.Context) (work []string)
