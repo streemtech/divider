@@ -1,4 +1,4 @@
-package redis_consistent
+package redisconsistent
 
 import (
 	"crypto/md5"

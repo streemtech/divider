@@ -154,14 +154,6 @@ func (r *Divider) Close() {
 	r.mux.Unlock()
 }
 
-//StopAndClose is a simple helper to call Stop and Close.
-func (r *Divider) StopAndClose() {
-	r.mux.Lock()
-	r.stop()
-	r.close()
-	r.mux.Unlock()
-}
-
 //GetAssignedProcessingArray returns a string array that represents the keys that this node is set to process.
 func (r *Divider) GetAssignedProcessingArray() []string {
 	r.mux.Lock()
@@ -188,35 +180,15 @@ func (r *Divider) GetReceiveStopProcessingChan() <-chan string {
 //This is to be used to confirm that the processing has stopped for a key gotten from the GetReceiveStopProcessingChan channel.
 //To manually release processing of a key, use SendStopProcessing instead.
 //ConfirmStopProcessing is expected to be required for the proper implementation of Flush()
-func (r *Divider) ConfirmStopProcessing(key string) {
-	r.informer.Errorf("Got confirm stop on %s. This divider only works on Pub Subs. Confirm Stop is not required as stop only occurs on pub sub close.", key)
+func (r *Divider) StartProcessing(key string) error {
+	return fmt.Errorf("Unimplemented")
 }
 
 //SendStopProcessing takes in a string of a key that this node is no longer processing.
 //This is to be used to release the processing to another node.
 //To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
-func (r *Divider) SendStopProcessing(key string) {
-	r.sendStopProcessing(key)
-}
-
-//SetAffinity allows for the affinity to be set by the node so that some controll can be implemented over what nodes receive work.
-func (r *Divider) SetAffinity(Affinity divider.Affinity) {
-	r.mux.Lock()
-	r.setAffinity(Affinity)
-	r.mux.Unlock()
-}
-
-//GetAffinity returns the current affinity. Most cases that use get and then Set affinity would be better off using AlterAffinity.
-func (r *Divider) GetAffinity() (Affinity divider.Affinity) {
-	return r.affinity
-}
-
-//AlterAffinity takes in an integer and increases the current affinity by that amount.
-//This method of updating the affinity should be implemented as concurrency safe.
-func (r *Divider) AlterAffinity(Affinity divider.Affinity) {
-	r.mux.Lock()
-	r.setAffinity(r.affinity + Affinity)
-	r.mux.Unlock()
+func (r *Divider) StopProcessing(key string) error {
+	return fmt.Errorf("Unimplemented")
 }
 
 func (r *Divider) start() {
@@ -228,22 +200,15 @@ func (r *Divider) start() {
 	if r.affinity == 0 {
 		r.affinity = 1000
 	}
-	r.setAffinity(r.affinity)
 	r.watch()
 
 }
 
 func (r *Divider) stop() {
-	aff := r.GetAffinity()
-	r.setAffinity(0)
 	r.doneCancel()
 	r.done = nil
 	r.doneCancel = nil
-	keys := r.getAssignedProcessingArray()
-	for _, key := range keys {
-		r.sendStopProcessing(key)
-	}
-	r.setAffinity(aff)
+
 	//pipe all the living ones through the sendStopProcessing.
 }
 
@@ -323,16 +288,6 @@ func (r *Divider) watchForUpdates() {
 			return
 		}
 	}
-}
-
-//Internal affinity setting.
-func (r *Divider) setAffinity(Affinity divider.Affinity) {
-	r.informer.Infof("Setting affinity for %s to %d", r.uuid, Affinity)
-	r.affinity = Affinity
-}
-
-func (r *Divider) sendStopProcessing(key string) {
-	//TODO1 implement sendStopProcessing as a way for this node to say I am done.
 }
 
 func (r *Divider) getAssignedProcessingArray() []string {

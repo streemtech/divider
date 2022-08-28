@@ -1,4 +1,4 @@
-package redis_consistent
+package redisconsistent
 
 import (
 	"context"
@@ -81,6 +81,7 @@ func NewDivider(r redis.UniversalClient, masterKey, name string, informer divide
 	done()
 	if err != nil {
 		informer.Errorf("ping error: %s", err.Error())
+		return nil
 	}
 	informer.Infof("Ping status result: %s", status)
 
@@ -163,7 +164,12 @@ func (r *Divider) GetReceiveStopProcessingChan() <-chan string {
 //This is to be used to release the processing to another node.
 //To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
 func (r *Divider) StopProcessing(key string) error {
-	return r.r.RemoveWork(r.done, key)
+	err := r.r.RemoveWork(r.done, key)
+	if err != nil {
+		return err
+	}
+	r.compareKeys()
+	return nil
 }
 
 //SendStopProcessing takes in a string of a key that this node is no longer processing.
@@ -206,6 +212,7 @@ func (r *Divider) close() {
 
 //goes through and adds compares the keys that the divider currently has to the keys that it should have
 //It then outputs the updated keys to the respective channels
+//This is the thing that should be run if there is work completed.
 func (r *Divider) compareKeys() {
 	defer func() {
 		if rec := recover(); rec != nil {
