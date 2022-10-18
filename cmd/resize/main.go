@@ -19,12 +19,12 @@ func main() {
 	})
 	l := divider.DefaultLogger{}
 
-	d1 := redisconsistent.NewDivider(r, "con:test", uuid.New().String(), l, time.Second, time.Second, 3)
+	d1 := redisconsistent.NewDivider(r, "con:test", uuid.New().String(), l, time.Second, time.Second, 3, nil)
 	if d1 == nil {
 		panic("Unable to create divider")
 	}
 
-	d2 := redisconsistent.NewDivider(r, "con:test", uuid.New().String(), l, time.Second, time.Second, 3)
+	d2 := redisconsistent.NewDivider(r, "con:test", uuid.New().String(), l, time.Second, time.Second, 3, nil)
 	if d2 == nil {
 		panic("Unable to create divider")
 	}

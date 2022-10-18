@@ -2,11 +2,13 @@ package redisconsistent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/streemtech/divider"
 	"github.com/streemtech/divider/internal/ticker"
 
@@ -15,7 +17,7 @@ import (
 
 var _ divider.Divider = (*Divider)(nil)
 
-//Divider is a redis backed, consistent hashing implementation of divider.Divider. The
+// Divider is a redis backed, consistent hashing implementation of divider.Divider. The
 // affinity value in this case is the number of virtual nodes that the divider uses.
 type Divider struct {
 	redis redis.UniversalClient //contains the main redis instance that data is stored into.
@@ -37,15 +39,22 @@ type Divider struct {
 
 	r           redisWorkerImpl
 	workFetcher divider.WorkFetcher
+
+	metrics *Metrics
+}
+type Metrics struct {
+	UpdateAssignmentsTime prometheus.Observer
+	CompareKeysTime       prometheus.Observer
+	AssignedWork          prometheus.Gauge
 }
 
-//NewDivider returns a Divider using the Go-Redis library as a backend, and consistent hashing.
-//The keys beginning in <masterKey>:__meta are used to keep track of the different
-//metainformation to divide the work.
+// NewDivider returns a Divider using the Go-Redis library as a backend, and consistent hashing.
+// The keys beginning in <masterKey>:__meta are used to keep track of the different
+// metainformation to divide the work.
 // timeout is the time that requrests may take up to. if empty, set to 1 second.
-//master timeout is the maximum length of time that the master may go without showing up. if empty, set to 10 seconds
-//name is the unique name of the instance. If "", name is a random uuid.
-func NewDivider(r redis.UniversalClient, masterKey, name string, informer divider.Informer, timeout, masterTimeout time.Duration, nodecount int) *Divider {
+// master timeout is the maximum length of time that the master may go without showing up. if empty, set to 10 seconds
+// name is the unique name of the instance. If "", name is a random uuid.
+func NewDivider(r redis.UniversalClient, masterKey, name string, informer divider.Informer, timeout, masterTimeout time.Duration, nodecount int, metrics *Metrics) *Divider {
 	var i divider.Informer
 	if informer == nil {
 		i = divider.DefaultLogger{}
@@ -95,12 +104,13 @@ func NewDivider(r redis.UniversalClient, masterKey, name string, informer divide
 		masterTimeout: mt,
 		nodecount:     nodecount,
 		r:             redisWorkerImpl{timeout: t, r: r, masterKey: masterKey},
+		metrics:       metrics,
 	}
 
 	return d
 }
 
-//SetWorkFetcher tells the deivider how to look up the list of work that needs to be done.
+// SetWorkFetcher tells the deivider how to look up the list of work that needs to be done.
 func (r *Divider) SetWorkFetcher(f divider.WorkFetcher) error {
 	if f == nil {
 		return fmt.Errorf("work divider can not be nill")
@@ -109,8 +119,8 @@ func (r *Divider) SetWorkFetcher(f divider.WorkFetcher) error {
 	return nil
 }
 
-//Start is the trigger to make the divider begin checking for keys, and returning those keys to the channels.
-//No values should return to the channels without start being called.
+// Start is the trigger to make the divider begin checking for keys, and returning those keys to the channels.
+// No values should return to the channels without start being called.
 func (r *Divider) Start() {
 	r.mux.Lock()
 	//make so I cant start multiple times.
@@ -118,31 +128,31 @@ func (r *Divider) Start() {
 	r.mux.Unlock()
 }
 
-//Stop begins the process of stopping processing of all assigned keys.
-//Releasing these keys via stop allows them to immediately be picked up by other nodes.
-//Start must be called to begin picking up work keys again.
+// Stop begins the process of stopping processing of all assigned keys.
+// Releasing these keys via stop allows them to immediately be picked up by other nodes.
+// Start must be called to begin picking up work keys again.
 func (r *Divider) Stop() {
 	r.mux.Lock()
 	r.stop()
 	r.mux.Unlock()
 }
 
-//Close shuts down, closes and cleans up the process.
-//If called before flushed, processing keys will be timed out instead of released.
+// Close shuts down, closes and cleans up the process.
+// If called before flushed, processing keys will be timed out instead of released.
 func (r *Divider) Close() {
 	r.mux.Lock()
 	r.close()
 	r.mux.Unlock()
 }
 
-//GetAssignedProcessingArray returns a string array that represents the keys that this node is set to process.
+// GetAssignedProcessingArray returns a string array that represents the keys that this node is set to process.
 func (r *Divider) GetAssignedProcessingArray() []string {
 	return r.currentKeys
 }
 
-//GetReceiveStartProcessingChan returns a channel of strings.
-//The string from this channel represents a key to a processable entity.
-//This particular channel is for receiving keys that this node is to begin processing.
+// GetReceiveStartProcessingChan returns a channel of strings.
+// The string from this channel represents a key to a processable entity.
+// This particular channel is for receiving keys that this node is to begin processing.
 func (r *Divider) GetReceiveStartProcessingChan() <-chan string {
 	if r.startChan == nil {
 		r.startChan = make(chan string)
@@ -150,9 +160,9 @@ func (r *Divider) GetReceiveStartProcessingChan() <-chan string {
 	return r.startChan
 }
 
-//GetReceiveStopProcessingChan returns a channel of strings.
-//The string from this channel represents a key to a processable entity.
-//This particular channel is for receiving keys that this node is to stop processing.
+// GetReceiveStopProcessingChan returns a channel of strings.
+// The string from this channel represents a key to a processable entity.
+// This particular channel is for receiving keys that this node is to stop processing.
 func (r *Divider) GetReceiveStopProcessingChan() <-chan string {
 	if r.stopChan == nil {
 		r.stopChan = make(chan string)
@@ -160,9 +170,9 @@ func (r *Divider) GetReceiveStopProcessingChan() <-chan string {
 	return r.stopChan
 }
 
-//SendStopProcessing takes in a string of a key that this node is no longer processing.
-//This is to be used to release the processing to another node.
-//To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
+// SendStopProcessing takes in a string of a key that this node is no longer processing.
+// This is to be used to release the processing to another node.
+// To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
 func (r *Divider) StopProcessing(key string) error {
 	err := r.r.RemoveWork(r.done, key)
 	if err != nil {
@@ -172,14 +182,14 @@ func (r *Divider) StopProcessing(key string) error {
 	return nil
 }
 
-//SendStopProcessing takes in a string of a key that this node is no longer processing.
-//This is to be used to release the processing to another node.
-//To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
+// SendStopProcessing takes in a string of a key that this node is no longer processing.
+// This is to be used to release the processing to another node.
+// To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
 func (r *Divider) StartProcessing(key string) error {
 	return r.r.AddWork(r.done, key)
 }
 
-//start the listeners/watchers for updating keys.
+// start the listeners/watchers for updating keys.
 func (r *Divider) start() {
 
 	if r.done != nil {
@@ -196,7 +206,7 @@ func (r *Divider) start() {
 
 }
 
-//stop the updater for watching for keys.
+// stop the updater for watching for keys.
 func (r *Divider) stop() {
 
 	r.doneCancel()
@@ -210,10 +220,11 @@ func (r *Divider) close() {
 	//Nothing happens here in this particular implementation as the connection to redis is passed in.
 }
 
-//goes through and adds compares the keys that the divider currently has to the keys that it should have
-//It then outputs the updated keys to the respective channels
-//This is the thing that should be run if there is work completed.
+// goes through and adds compares the keys that the divider currently has to the keys that it should have
+// It then outputs the updated keys to the respective channels
+// This is the thing that should be run if there is work completed.
 func (r *Divider) compareKeys() {
+	start := time.Now()
 	defer func() {
 		if rec := recover(); rec != nil {
 			r.informer.Errorf("Forced to recover from panic in compare keys: %v", rec)
@@ -221,9 +232,9 @@ func (r *Divider) compareKeys() {
 	}()
 
 	//take in the keys from the remote, and compare them to the list of current keys. if there are any changes, pipe them to the listener.
-	newKeys := r.getAssignedProcessingArray()
+	currentWork := r.getAssignedProcessingArray()
 
-	add, remove := getToRemoveToKeep(r.currentKeys, newKeys)
+	add, remove := getToRemoveToKeep(r.currentKeys, currentWork)
 
 	//send out keys that need to be started
 	for _, key := range add {
@@ -239,7 +250,15 @@ func (r *Divider) compareKeys() {
 		}
 	}
 
-	r.currentKeys = newKeys
+	r.currentKeys = currentWork
+
+	if r.metrics != nil && r.metrics.CompareKeysTime != nil {
+		r.metrics.CompareKeysTime.Observe(float64(time.Since(start)) / float64(time.Second))
+	}
+
+	if r.metrics != nil && r.metrics.AssignedWork != nil {
+		r.metrics.AssignedWork.Set(float64(len(currentWork)))
+	}
 }
 
 func (r *Divider) watch() {
@@ -270,7 +289,7 @@ func (r *Divider) watch() {
 
 }
 
-//returns the list of things that this node is supposed to watch.
+// returns the list of things that this node is supposed to watch.
 func (r *Divider) getAssignedProcessingArray() []string {
 	workers := r.getWorkerList()
 
@@ -303,7 +322,7 @@ func (r *Divider) getWorkerList() []string {
 	return z
 }
 
-//updatePing is used to consistently tell the system that the worker is online, and listening to work.
+// updatePing is used to consistently tell the system that the worker is online, and listening to work.
 func (r *Divider) updatePing() {
 
 	defer func() {
@@ -348,9 +367,10 @@ func (r *Divider) updatePing() {
 
 }
 
-//updates all assignments if master.
+// updates all assignments if master.
 func (r *Divider) updateAssignments() {
 
+	start := time.Now()
 	//only run if workfetcher actually exists.
 	if r.workFetcher == nil {
 		return
@@ -365,6 +385,9 @@ func (r *Divider) updateAssignments() {
 	//check the master key.
 	master, err := r.redis.Get(r.done, r.masterKey).Result()
 	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return
+		}
 		r.informer.Errorf("get current master error: %s!", err.Error())
 		return
 	}
@@ -373,18 +396,18 @@ func (r *Divider) updateAssignments() {
 	if master == r.instanceName {
 
 		err = r.updateData()
-
 		if err != nil {
 			r.informer.Errorf("Error when updating data: %s!", err.Error())
 			return
 		}
-
+		if r.metrics != nil && r.metrics.UpdateAssignmentsTime != nil {
+			r.metrics.UpdateAssignmentsTime.Observe(float64(time.Since(start)) / float64(time.Second))
+		}
 	}
-
 }
 
-//updateData does the work to keep track of the work distribution.
-//This work should only be done by the master.
+// updateData does the work to keep track of the work distribution.
+// This work should only be done by the master.
 func (r *Divider) updateData() error {
 
 	//only run if workfetcher actually exists.

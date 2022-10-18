@@ -64,14 +64,14 @@ func (r *redisWorkerImpl) getTimeoutsKey() string {
 	return r.masterKey + ":timeout"
 }
 
-//CalculateKey is responsible for generating a consistent key for usage in
-//certain work calculations.
+// CalculateKey is responsible for generating a consistent key for usage in
+// certain work calculations.
 func (r *redisWorkerImpl) CalculateKey(value string) (key int64) {
 	return StringToIntHash(value)
 }
 
-//AddWork adds the given work to the work cycle.
-//The key is caluclated automatically from the value.
+// AddWork adds the given work to the work cycle.
+// The key is caluclated automatically from the value.
 func (r *redisWorkerImpl) AddWork(ctx context.Context, value string) error {
 	// if r.l != nil {
 	// 	r.l.Debugf("Adding work %s", value)
@@ -82,8 +82,8 @@ func (r *redisWorkerImpl) AddWork(ctx context.Context, value string) error {
 	}).Err()
 }
 
-//remove work removes this value from the work cycle.
-//The key is calculated automatically from the value.
+// remove work removes this value from the work cycle.
+// The key is calculated automatically from the value.
 func (r *redisWorkerImpl) RemoveWork(ctx context.Context, value string) error {
 	// if r.l != nil {
 	// 	r.l.Debugf("removing work %s", value)
@@ -184,7 +184,7 @@ func (r *redisWorkerImpl) getNextValidWorker(ctx context.Context, keyScore float
 
 }
 
-//Get work gets the full list of work between key and the next worker.
+// Get work gets the full list of work between key and the next worker.
 func (r *redisWorkerImpl) GetFollowingWork(ctx context.Context, key string) (workList []string, err error) {
 	startScore := float64(r.CalculateKey(key))
 	nextWorkScore, err := r.getNextValidWorker(ctx, startScore)
@@ -240,8 +240,8 @@ func (r *redisWorkerImpl) GetAllWork(ctx context.Context) (workList []string, er
 	return workList, nil
 }
 
-//Set the current time to have a score of key
-//this allows GetNextWorker to skip anything that has been timed out.
+// Set the current time to have a score of key
+// this allows GetNextWorker to skip anything that has been timed out.
 func (r *redisWorkerImpl) UpdateWorkers(ctx context.Context, Key []string) error {
 
 	nodeDat := make([]*redis.Z, len(Key))
@@ -273,13 +273,16 @@ func (r *redisWorkerImpl) UpdateWorkers(ctx context.Context, Key []string) error
 	return nil
 }
 
-//AddWork adds the given work to the work cycle.
-//The key is caluclated automatically from the value.
+// AddWork adds the given work to the work cycle.
+// The key is caluclated automatically from the value.
 func (r *redisWorkerImpl) AddWorks(ctx context.Context, value []string) error {
+	if len(value) <= 0 {
+		return nil
+	}
 	dat := make([]*redis.Z, len(value))
 	for i, v := range value {
 		dat[i] = &redis.Z{
-			Member: value,
+			Member: v,
 			Score:  float64(r.CalculateKey(v)),
 		}
 	}
