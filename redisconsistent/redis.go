@@ -40,6 +40,9 @@ type Divider struct {
 	r           redisWorkerImpl
 	workFetcher divider.WorkFetcher
 
+	updateAssignmentsDuration time.Duration
+	compareKeysDuration       time.Duration
+
 	metrics *Metrics
 }
 type Metrics struct {
@@ -54,7 +57,17 @@ type Metrics struct {
 // timeout is the time that requrests may take up to. if empty, set to 1 second.
 // master timeout is the maximum length of time that the master may go without showing up. if empty, set to 10 seconds
 // name is the unique name of the instance. If "", name is a random uuid.
-func NewDivider(r redis.UniversalClient, masterKey, name string, informer divider.Informer, timeout, masterTimeout time.Duration, nodecount int, metrics *Metrics) *Divider {
+// TODO3 replace this input with an object input
+func NewDivider(r redis.UniversalClient,
+	masterKey,
+	name string,
+	informer divider.Informer,
+	timeout,
+	masterTimeout time.Duration,
+	nodecount int,
+	metrics *Metrics,
+	updateAssignmentsDuration,
+	compareKeysDuration time.Duration) *Divider {
 	var i divider.Informer
 	if informer == nil {
 		i = divider.DefaultLogger{}
@@ -95,16 +108,18 @@ func NewDivider(r redis.UniversalClient, masterKey, name string, informer divide
 	informer.Infof("Ping status result: %s", status)
 
 	d := &Divider{
-		redis:         r,
-		masterKey:     masterKey + ":leader",
-		mux:           &sync.Mutex{},
-		instanceName:  instanceID,
-		informer:      i,
-		timeout:       t,
-		masterTimeout: mt,
-		nodecount:     nodecount,
-		r:             redisWorkerImpl{timeout: t, r: r, masterKey: masterKey},
-		metrics:       metrics,
+		redis:                     r,
+		masterKey:                 masterKey + ":leader",
+		mux:                       &sync.Mutex{},
+		instanceName:              instanceID,
+		informer:                  i,
+		timeout:                   t,
+		masterTimeout:             mt,
+		nodecount:                 nodecount,
+		r:                         redisWorkerImpl{timeout: t, r: r, masterKey: masterKey},
+		metrics:                   metrics,
+		updateAssignmentsDuration: updateAssignmentsDuration,
+		compareKeysDuration:       compareKeysDuration,
 	}
 
 	return d
@@ -274,7 +289,7 @@ func (r *Divider) watch() {
 	//start the timer for updating the work if work updating is centralized.
 	ticker.TickerFunc{
 		C:      r.done,
-		D:      time.Millisecond * 500,
+		D:      r.updateAssignmentsDuration,
 		Logger: r.informer,
 		F:      r.updateAssignments,
 	}.Do()
@@ -282,7 +297,7 @@ func (r *Divider) watch() {
 	//get the work that this node needs to do.
 	ticker.TickerFunc{
 		C:      r.done,
-		D:      time.Millisecond * 500,
+		D:      r.compareKeysDuration,
 		Logger: r.informer,
 		F:      r.compareKeys,
 	}.Do()
