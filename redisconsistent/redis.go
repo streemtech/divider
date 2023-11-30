@@ -12,7 +12,7 @@ import (
 	"github.com/streemtech/divider"
 	"github.com/streemtech/divider/internal/ticker"
 
-	redis "github.com/go-redis/redis/v8"
+	redis "github.com/redis/go-redis/v9"
 )
 
 var _ divider.Divider = (*Divider)(nil)

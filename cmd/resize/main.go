@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/streemtech/divider"
 	"github.com/streemtech/divider/redisconsistent"
 )
@@ -15,7 +15,7 @@ func main() {
 
 	r := redis.NewUniversalClient(&redis.UniversalOptions{
 		Password: "password",
-		Addrs:    []string{"192.168.100.153:6379"},
+		Addrs:    []string{"192.168.35.1:6379"},
 	})
 	l := divider.DefaultLogger{}
 

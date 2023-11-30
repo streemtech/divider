@@ -15,11 +15,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/streemtech/divider"
 
-	cache "github.com/go-redis/cache/v8"
-	redis "github.com/go-redis/redis/v8"
+	cache "github.com/go-redis/cache/v9"
+	redis "github.com/redis/go-redis/v9"
 )
 
-//Divider is a redis backed implementation of divider.Divider. The
+// Divider is a redis backed implementation of divider.Divider. The
 type Divider struct {
 	redis      redis.UniversalClient
 	redisCache *cache.Cache
@@ -57,11 +57,11 @@ type Divider struct {
 
 var _ divider.Divider = (*Divider)(nil)
 
-//NewDivider returns a Divider using the Go-Redis library as a backend.
-//The keys beginning in <masterKey>:__meta are used to keep track of the different
-//metainformation to divide the work.
+// NewDivider returns a Divider using the Go-Redis library as a backend.
+// The keys beginning in <masterKey>:__meta are used to keep track of the different
+// metainformation to divide the work.
 //
-//:* is appended automatically to the work when using default work fetcher.!!
+// :* is appended automatically to the work when using default work fetcher.!!
 func NewDivider(r redis.UniversalClient, masterKey, name string, informer divider.Informer, timeout, masterTimeout int) *Divider {
 	var i divider.Informer
 	if informer == nil {
@@ -119,7 +119,7 @@ func NewDivider(r redis.UniversalClient, masterKey, name string, informer divide
 	return d
 }
 
-//SetWorkFetcher tells the deivider how to look up the list of work that needs to be done.
+// SetWorkFetcher tells the deivider how to look up the list of work that needs to be done.
 func (r *Divider) SetWorkFetcher(f divider.WorkFetcher) error {
 	if f == nil {
 		return fmt.Errorf("work divider can not be nill")
@@ -128,8 +128,8 @@ func (r *Divider) SetWorkFetcher(f divider.WorkFetcher) error {
 	return nil
 }
 
-//Start is the trigger to make the divider begin checking for keys, and returning those keys to the channels.
-//No values should return to the channels without start being called.
+// Start is the trigger to make the divider begin checking for keys, and returning those keys to the channels.
+// No values should return to the channels without start being called.
 func (r *Divider) Start() {
 	r.mux.Lock()
 	//make so I cant start multiple times.
@@ -137,24 +137,24 @@ func (r *Divider) Start() {
 	r.mux.Unlock()
 }
 
-//Stop begins the process of stopping processing of all assigned keys.
-//Releasing these keys via stop allows them to immediately be picked up by other nodes.
-//Start must be called to begin picking up work keys again.
+// Stop begins the process of stopping processing of all assigned keys.
+// Releasing these keys via stop allows them to immediately be picked up by other nodes.
+// Start must be called to begin picking up work keys again.
 func (r *Divider) Stop() {
 	r.mux.Lock()
 	r.stop()
 	r.mux.Unlock()
 }
 
-//Close shuts down, closes and cleans up the process.
-//If called before flushed, processing keys will be timed out instead of released.
+// Close shuts down, closes and cleans up the process.
+// If called before flushed, processing keys will be timed out instead of released.
 func (r *Divider) Close() {
 	r.mux.Lock()
 	r.close()
 	r.mux.Unlock()
 }
 
-//GetAssignedProcessingArray returns a string array that represents the keys that this node is set to process.
+// GetAssignedProcessingArray returns a string array that represents the keys that this node is set to process.
 func (r *Divider) GetAssignedProcessingArray() []string {
 	r.mux.Lock()
 	v := r.getAssignedProcessingArray()
@@ -162,31 +162,31 @@ func (r *Divider) GetAssignedProcessingArray() []string {
 	return v
 }
 
-//GetReceiveStartProcessingChan returns a channel of strings.
-//The string from this channel represents a key to a processable entity.
-//This particular channel is for receiving keys that this node is to begin processing.
+// GetReceiveStartProcessingChan returns a channel of strings.
+// The string from this channel represents a key to a processable entity.
+// This particular channel is for receiving keys that this node is to begin processing.
 func (r *Divider) GetReceiveStartProcessingChan() <-chan string {
 	return r.startChan
 }
 
-//GetReceiveStopProcessingChan returns a channel of strings.
-//The string from this channel represents a key to a processable entity.
-//This particular channel is for receiving keys that this node is to stop processing.
+// GetReceiveStopProcessingChan returns a channel of strings.
+// The string from this channel represents a key to a processable entity.
+// This particular channel is for receiving keys that this node is to stop processing.
 func (r *Divider) GetReceiveStopProcessingChan() <-chan string {
 	return r.stopChan
 }
 
-//ConfirmStopProcessing takes in a string of a key that this node is no longer processing.
-//This is to be used to confirm that the processing has stopped for a key gotten from the GetReceiveStopProcessingChan channel.
-//To manually release processing of a key, use SendStopProcessing instead.
-//ConfirmStopProcessing is expected to be required for the proper implementation of Flush()
+// ConfirmStopProcessing takes in a string of a key that this node is no longer processing.
+// This is to be used to confirm that the processing has stopped for a key gotten from the GetReceiveStopProcessingChan channel.
+// To manually release processing of a key, use SendStopProcessing instead.
+// ConfirmStopProcessing is expected to be required for the proper implementation of Flush()
 func (r *Divider) StartProcessing(key string) error {
 	return fmt.Errorf("Unimplemented")
 }
 
-//SendStopProcessing takes in a string of a key that this node is no longer processing.
-//This is to be used to release the processing to another node.
-//To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
+// SendStopProcessing takes in a string of a key that this node is no longer processing.
+// This is to be used to release the processing to another node.
+// To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
 func (r *Divider) StopProcessing(key string) error {
 	return fmt.Errorf("Unimplemented")
 }
@@ -262,7 +262,7 @@ func (r *Divider) watch() {
 	go r.watchForUpdates()
 }
 
-//watchForKeys is a function looped to constantly look for new keys that need results output to them.
+// watchForKeys is a function looped to constantly look for new keys that need results output to them.
 func (r *Divider) watchForKeys() {
 
 	for {
@@ -276,7 +276,7 @@ func (r *Divider) watchForKeys() {
 	}
 }
 
-//watchForUpdates is a function looped to constantly check the system and make sure that the work is divided right.
+// watchForUpdates is a function looped to constantly check the system and make sure that the work is divided right.
 func (r *Divider) watchForUpdates() {
 
 	for {
@@ -308,7 +308,7 @@ func (r *Divider) getAssignedProcessingArray() []string {
 	return assigned
 }
 
-//updatePing is used to consistently tell the system that the worker is online, and listening to work.
+// updatePing is used to consistently tell the system that the worker is online, and listening to work.
 func (r *Divider) updatePing() {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -331,7 +331,7 @@ func (r *Divider) updatePing() {
 
 }
 
-//updates all assignments if master.
+// updates all assignments if master.
 func (r *Divider) updateAssignments() {
 
 	defer func() {
@@ -365,8 +365,8 @@ func (r *Divider) updateAssignments() {
 
 }
 
-//updateData does the work to keep track of the work distribution.
-//This work should only be done by the master.
+// updateData does the work to keep track of the work distribution.
+// This work should only be done by the master.
 func (r *Divider) updateData() error {
 	data, err := r.getInfo()
 	data.divider = r
@@ -498,13 +498,13 @@ func (r *Divider) setInfo(data *DividerData) error {
 
 }
 
-//NodeCountChange is a simple structure to allow for sorting by what node needs to add what data.
+// NodeCountChange is a simple structure to allow for sorting by what node needs to add what data.
 type NodeCountChange struct {
 	Node        string
 	ChangeCount int
 }
 
-//NodeCountChangesSort is used to implement a sorter on NodeChange.
+// NodeCountChangesSort is used to implement a sorter on NodeChange.
 type NodeCountChangesSort []NodeCountChange
 
 func (a NodeCountChangesSort) Len() int      { return len(a) }
@@ -519,7 +519,7 @@ func (a NodeCountChangesSort) Less(i, j int) bool {
 	return strings.Compare(a[i].Node, a[j].Node) > 0
 }
 
-//DividerData is a backup of the dividerData
+// DividerData is a backup of the dividerData
 type DividerData struct {
 	//Worker is map[workId]workerNode so that you can look up the worker based on the work
 	Worker map[string]string

@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	redis "github.com/go-redis/redis/v8"
+	redis "github.com/redis/go-redis/v9"
 )
 
 type Worker interface {
@@ -76,7 +76,7 @@ func (r *redisWorkerImpl) AddWork(ctx context.Context, value string) error {
 	// if r.l != nil {
 	// 	r.l.Debugf("Adding work %s", value)
 	// }
-	return r.r.ZAdd(ctx, r.getDataKey(), &redis.Z{
+	return r.r.ZAdd(ctx, r.getDataKey(), redis.Z{
 		Score:  float64(r.CalculateKey(value)),
 		Member: value,
 	}).Err()
@@ -244,16 +244,16 @@ func (r *redisWorkerImpl) GetAllWork(ctx context.Context) (workList []string, er
 // this allows GetNextWorker to skip anything that has been timed out.
 func (r *redisWorkerImpl) UpdateWorkers(ctx context.Context, Key []string) error {
 
-	nodeDat := make([]*redis.Z, len(Key))
-	timeoutDat := make([]*redis.Z, len(Key))
+	nodeDat := make([]redis.Z, len(Key))
+	timeoutDat := make([]redis.Z, len(Key))
 	for i, v := range Key {
 		ks := r.CalculateKey(v)
 		k := float64(ks)
-		nodeDat[i] = &redis.Z{
+		nodeDat[i] = redis.Z{
 			Score:  k,
 			Member: ks,
 		}
-		timeoutDat[i] = &redis.Z{
+		timeoutDat[i] = redis.Z{
 			Score:  float64(time.Now().UnixNano()),
 			Member: ks,
 		}
@@ -279,9 +279,9 @@ func (r *redisWorkerImpl) AddWorks(ctx context.Context, value []string) error {
 	if len(value) <= 0 {
 		return nil
 	}
-	dat := make([]*redis.Z, len(value))
+	dat := make([]redis.Z, len(value))
 	for i, v := range value {
-		dat[i] = &redis.Z{
+		dat[i] = redis.Z{
 			Member: v,
 			Score:  float64(r.CalculateKey(v)),
 		}

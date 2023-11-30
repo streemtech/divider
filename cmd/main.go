@@ -8,7 +8,7 @@ import (
 
 	"github.com/streemtech/divider"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	rd "github.com/streemtech/divider/redis"
 )
 
