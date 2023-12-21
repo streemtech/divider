@@ -247,8 +247,9 @@ func (r *redisWorkerImpl) UpdateWorkers(ctx context.Context, Key []string) error
 	nodeDat := make([]redis.Z, len(Key))
 	timeoutDat := make([]redis.Z, len(Key))
 	for i, v := range Key {
-		ks := r.CalculateKey(v)
-		k := float64(ks)
+		ki := r.CalculateKey(v)
+		ks := fmt.Sprintf("%d", ki)
+		k := float64(ki)
 		nodeDat[i] = redis.Z{
 			Score:  k,
 			Member: ks,
