@@ -3,19 +3,20 @@ package ticker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
+
+	"github.com/streemtech/divider"
 )
 
 type TickerFunc struct {
-	Logger interface {
-		Errorf(message string, args ...interface{})
-	}
-	C context.Context
-	D time.Duration
-	F func()
+	Logger divider.LoggerGen
+	C      context.Context
+	D      time.Duration
+	F      func()
 }
 
-//DoTickerFunc is a very simple ticker function that, on Do does F in tickerFunc object until the context is called.
+// DoTickerFunc is a very simple ticker function that, on Do does F in tickerFunc object until the context is called.
 func (t TickerFunc) Do() error {
 	if t.D <= time.Duration(0) {
 		return fmt.Errorf("must have duration greater than 0")
@@ -36,7 +37,7 @@ func (t TickerFunc) Do() error {
 			ticker.Stop()
 			if e := recover(); e != nil {
 				if t.Logger != nil {
-					t.Logger.Errorf("Ran into exception when running ticker function: %+v", e)
+					t.Logger(t.C).Error("Ran into exception when running ticker function", slog.String("err.panic", fmt.Sprintf("%+v", e)))
 				}
 			}
 		}()
@@ -52,9 +53,9 @@ func (t TickerFunc) Do() error {
 	return nil
 }
 
-//SimpleTickerFunc takes in a duration and a function and creates a Ticker Function from those, returning a cancel
-//so that the user can focus on sending a duration and function. THe returned function when called will cancel the
-//ticker. This function panics on values that would error in TickerFunc creation.
+// SimpleTickerFunc takes in a duration and a function and creates a Ticker Function from those, returning a cancel
+// so that the user can focus on sending a duration and function. THe returned function when called will cancel the
+// ticker. This function panics on values that would error in TickerFunc creation.
 func SimpleTickerFunc(dur time.Duration, f func()) (cancel func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 

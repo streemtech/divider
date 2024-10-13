@@ -6,116 +6,147 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/streemtech/divider"
-
 	"github.com/redis/go-redis/v9"
-	rd "github.com/streemtech/divider/redis"
+	"github.com/streemtech/divider/redisconsistent"
 )
 
 func main() {
 
-	// if massTest {
-	// 	siulators()
-	// }
-
-	// makeWatcher(false, -1)
-
-	client := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "Password1234", // no password set
-		DB:       0,              // use default DB
+	r := redis.NewUniversalClient(&redis.UniversalOptions{
+		Password: "",
+		Addrs:    []string{"192.168.34.70:31081"},
 	})
 
-	// res, err := client.PubSubChannels(context.TODO(), "poll:*").Result()
-	// if err != nil && err.Error() != "redis: nil" {
-	// 	fmt.Printf(err.Error())
-	// }
-	// fmt.Printf("CHANNELS %v (%T)\n", res, res)
-	d1 := rd.NewDivider(client, keyStr, "", divider.DefaultLogger{}, 10, 3)
-	d1.Start()
-	time.Sleep(time.Millisecond * 100)
-	d2 := rd.NewDivider(client, keyStr, "", divider.DefaultLogger{}, 10, 3)
-	d2.Start()
-
-	for {
-		time.Sleep(time.Hour)
+	data := []string{}
+	for i := range 5 {
+		data = append(data, strconv.Itoa(i))
 	}
 
-}
+	// pp.Println(data)
 
-var massTest = true
-var keyStr = "test"
-var watchers = 2
-var subscribers = 10000
-
-func siulators() {
-	for i := 0; i < watchers; i++ {
-		go makeWatcher(false, i)
+	d1, err := redisconsistent.New(r, "con:test",
+		redisconsistent.WithInstanceID("d1"),
+		redisconsistent.WithNodeCount(3),
+		redisconsistent.WithStarter(func(ctx context.Context, key string) error {
+			fmt.Printf("Starting %s on d1\n", key)
+			return nil
+		}),
+		redisconsistent.WithStopper(func(ctx context.Context, key string) error {
+			fmt.Printf("Stopping %s on d1\n", key)
+			return nil
+		}),
+		redisconsistent.WithWorkFetcher(func(r context.Context) (work []string, err error) { return data, nil }),
+	)
+	if err != nil {
+		panic(err.Error())
 	}
+	if d1 == nil {
+		panic("Unable to create divider")
+	}
+
+	d2, err := redisconsistent.New(r, "con:test",
+		redisconsistent.WithInstanceID("d2"),
+		redisconsistent.WithNodeCount(3),
+		redisconsistent.WithStarter(func(ctx context.Context, key string) error {
+			fmt.Printf("Starting %s on d2\n", key)
+			return nil
+		}),
+		redisconsistent.WithStopper(func(ctx context.Context, key string) error {
+			fmt.Printf("Stopping %s on d2\n", key)
+			return nil
+		}),
+		redisconsistent.WithWorkFetcher(func(r context.Context) (work []string, err error) { return data, nil }),
+	)
+	if err != nil {
+		panic(err.Error())
+	}
+	if d2 == nil {
+		panic("Unable to create divider")
+	}
+
+	d1.StartWorker(context.Background())
+	d2.StartWorker(context.Background())
 	time.Sleep(time.Second)
-	client := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "Password1234", // no password set
-		DB:       0,              // use default DB
-	})
-	for i := 0; i < subscribers; i++ {
-		go makeSub(client, i)
+
+	//start adding new work
+	newData := []string{}
+	for i := range 5 {
+		newData = append(newData, strconv.Itoa(i+5))
+		data = append(data, strconv.Itoa(i+5))
+	}
+
+	// pp.Println(newData)
+
+	err = d1.StartProcessing(context.Background(), newData...)
+
+	if err != nil {
+		panic(err.Error())
+	}
+
+	time.Sleep(time.Second)
+	data = append(data, newData...)
+
+	time.Sleep(time.Second * 15)
+
+	i, _ := d1.GetWork(context.Background())
+	for v := range i {
+		fmt.Printf("D1: %s\n", v)
+	}
+
+	i, _ = d2.GetWork(context.Background())
+	for v := range i {
+		fmt.Printf("D2: %s\n", v)
+	}
+
+	fmt.Println("STOP D1")
+	d1.StopWorker(context.Background())
+	time.Sleep(time.Millisecond * 100)
+
+	i, _ = d2.GetWork(context.Background())
+	for v := range i {
+		fmt.Printf("D2: %s\n", v)
+	}
+
+	time.Sleep(time.Millisecond * 100)
+	fmt.Println("RESTART D1")
+	d1.StartWorker(context.Background())
+
+	time.Sleep(time.Millisecond * 100)
+
+	i, _ = d1.GetWork(context.Background())
+	for v := range i {
+		fmt.Printf("D1: %s\n", v)
+	}
+
+	i, _ = d2.GetWork(context.Background())
+	for v := range i {
+		fmt.Printf("D2: %s\n", v)
+	}
+
+	fmt.Println("Remove Individual work 0,1")
+
+	time.Sleep(time.Millisecond * 100)
+
+	d1.StopProcessing(context.Background(), "0", "1", "8")
+	time.Sleep(time.Millisecond * 100)
+
+	i, _ = d1.GetWork(context.Background())
+	for v := range i {
+		fmt.Printf("D1: %s\n", v)
+	}
+
+	i, _ = d2.GetWork(context.Background())
+	for v := range i {
+		fmt.Printf("D2: %s\n", v)
 	}
 }
 
-func makeWatcher(print bool, idx int) {
-	var divider divider.Divider
-	client := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "Password1234", // no password set
-		DB:       0,              // use default DB
-	})
+/*
 
-	// res, err := client.PubSubChannels(context.TODO(), "poll:*").Result()
-	// if err != nil && err.Error() != "redis: nil" {
-	// 	fmt.Printf(err.Error())
-	// }
-	// fmt.Printf("CHANNELS %v (%T)\n", res, res)
-	divider = rd.NewDivider(client, keyStr, "", nil, 10, 3)
-	divider.Start()
-	//divider.SetAffinity(1000)
-	//divider.SetAffinity(2000)
-	//divider.SetAffinity(3000)
-	//divider.SetAffinity(4000)
+del con:test:new_work
+del con:test:timeout
+del con:test:nodes
+del con:test:work
+del con:test:new_worker
 
-	if print {
-
-		for {
-			time.Sleep(time.Second)
-			now := time.Now()
-			vals := divider.GetAssignedProcessingArray()
-			dur := now.Sub(time.Now())
-			fmt.Printf("%s %v\n", dur.String(), vals)
-		}
-	} else {
-		in := divider.GetReceiveStartProcessingChan()
-		out := divider.GetReceiveStopProcessingChan()
-		for {
-			select {
-			case i := <-in: //currently thrashing. I suspect that it is because the assignment order is technicall inconsistent.
-				fmt.Printf("New  Data for %d: %s\n", idx, i)
-			case i := <-out:
-				fmt.Printf("Stop Data For %d: %s\n", idx, i)
-			}
-		}
-	}
-}
-
-func makeSub(client *redis.Client, i int) {
-
-	sub := client.Subscribe(context.Background(), keyStr+":"+strconv.Itoa(i))
-
-	channel := sub.Channel()
-
-	for {
-		select {
-		case d := <-channel:
-			fmt.Printf("data on channel %d: %s\n", i, d.String())
-		}
-	}
-}
+*/

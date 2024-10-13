@@ -2,456 +2,420 @@ package redisconsistent
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sync"
+	"iter"
+	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/pkg/errors"
+
 	"github.com/streemtech/divider"
+	"github.com/streemtech/divider/internal/redisstreams"
+	"github.com/streemtech/divider/internal/set"
 	"github.com/streemtech/divider/internal/ticker"
-
-	redis "github.com/redis/go-redis/v9"
 )
-
-var _ divider.Divider = (*Divider)(nil)
-
-// Divider is a redis backed, consistent hashing implementation of divider.Divider. The
-// affinity value in this case is the number of virtual nodes that the divider uses.
-type Divider struct {
-	redis redis.UniversalClient //contains the main redis instance that data is stored into.
-
-	masterKey string //the key that everything is built on.
-
-	mux           *sync.Mutex        //a mutex to make sure work is done safely.
-	startChan     chan string        //the channel to start work
-	stopChan      chan string        //the channel to stop work
-	done          context.Context    //a context that will end all requests if doneCancel is called
-	doneCancel    context.CancelFunc //a function that, if called, will end all requests.
-	instanceName  string             //the name of this instance of the divider
-	currentKeys   []string           //the list of currently owned keys by this divider
-	informer      divider.Informer   //the basic logger.
-	timeout       time.Duration      // duration to time out requests.
-	masterTimeout time.Duration      //time that the master can be gone for.
-	//the number of virtual nodes to assign. Defaults to 5.
-	nodecount int
-
-	r           redisWorkerImpl
-	workFetcher divider.WorkFetcher
-
-	updateAssignmentsDuration time.Duration
-	compareKeysDuration       time.Duration
-
-	metrics *Metrics
-}
-type Metrics struct {
-	UpdateAssignmentsTime prometheus.Observer
-	CompareKeysTime       prometheus.Observer
-	AssignedWork          prometheus.Gauge
-}
-
-// NewDivider returns a Divider using the Go-Redis library as a backend, and consistent hashing.
-// The keys beginning in <masterKey>:__meta are used to keep track of the different
-// metainformation to divide the work.
-// timeout is the time that requrests may take up to. if empty, set to 1 second.
-// master timeout is the maximum length of time that the master may go without showing up. if empty, set to 10 seconds
-// name is the unique name of the instance. If "", name is a random uuid.
-// TODO3 replace this input with an object input
-func NewDivider(r redis.UniversalClient,
-	masterKey,
-	name string,
-	informer divider.Informer,
-	timeout,
-	masterTimeout time.Duration,
-	nodecount int,
-	metrics *Metrics,
-	updateAssignmentsDuration,
-	compareKeysDuration time.Duration) *Divider {
-	var i divider.Informer
-	if informer == nil {
-		i = divider.DefaultLogger{}
-	} else {
-		i = informer
-	}
-	var t time.Duration
-	var mt time.Duration
-	if timeout <= 0 {
-		t = time.Second * 1
-	} else {
-		t = timeout
-	}
-
-	if masterTimeout <= 0 {
-		mt = time.Second * 10
-	} else {
-		mt = masterTimeout
-	}
-
-	if nodecount <= 0 {
-		nodecount = 5
-	}
-
-	//set the instanceID.
-	instanceID := name
-	if instanceID == "" {
-		instanceID = uuid.New().String()
-	}
-
-	ctx, done := context.WithTimeout(context.Background(), time.Second)
-	status, err := r.Ping(ctx).Result()
-	done()
-	if err != nil {
-		informer.Errorf("ping error: %s", err.Error())
-		return nil
-	}
-	informer.Infof("Ping status result: %s", status)
-
-	d := &Divider{
-		redis:                     r,
-		masterKey:                 masterKey + ":leader",
-		mux:                       &sync.Mutex{},
-		instanceName:              instanceID,
-		informer:                  i,
-		timeout:                   t,
-		masterTimeout:             mt,
-		nodecount:                 nodecount,
-		r:                         redisWorkerImpl{timeout: t, r: r, masterKey: masterKey},
-		metrics:                   metrics,
-		updateAssignmentsDuration: updateAssignmentsDuration,
-		compareKeysDuration:       compareKeysDuration,
-	}
-
-	return d
-}
-
-// SetWorkFetcher tells the deivider how to look up the list of work that needs to be done.
-func (r *Divider) SetWorkFetcher(f divider.WorkFetcher) error {
-	if f == nil {
-		return fmt.Errorf("work divider can not be nill")
-	}
-	r.workFetcher = f
-	return nil
-}
 
 // Start is the trigger to make the divider begin checking for keys, and returning those keys to the channels.
 // No values should return to the channels without start being called.
-func (r *Divider) Start() {
-	r.mux.Lock()
-	//make so I cant start multiple times.
-	r.start()
-	r.mux.Unlock()
+// Start and stop processing can be called without calling start.
+func (d *dividerWorker) StartWorker(ctx context.Context) {
+
+	if d.ctx != nil {
+		return
+	}
+
+	d.ctx, d.cancel = context.WithCancel(context.WithoutCancel(ctx))
+
+	var logger divider.LoggerGen
+	//start tickers and listeners
+	d.newWorker = redisstreams.StreamListener{
+		Ctx:      d.ctx,
+		Client:   d.client,
+		Key:      fmt.Sprintf("%s:%s", d.conf.rootKey, "new_worker"),
+		Callback: d.newWorkerEvent,
+		Logger:   logger,
+	}
+	d.removeWorker = redisstreams.StreamListener{
+		Ctx:      d.ctx,
+		Client:   d.client,
+		Key:      fmt.Sprintf("%s:%s", d.conf.rootKey, "remove_worker"),
+		Callback: d.removeWorkerEvent,
+		Logger:   logger,
+	}
+	d.newWork = redisstreams.StreamListener{
+		Ctx:      d.ctx,
+		Client:   d.client,
+		Key:      fmt.Sprintf("%s:%s", d.conf.rootKey, "new_work"),
+		Callback: d.newWorkEvent,
+		Logger:   logger,
+	}
+	d.removeWork = redisstreams.StreamListener{
+		Ctx:      d.ctx,
+		Client:   d.client,
+		Key:      fmt.Sprintf("%s:%s", d.conf.rootKey, "remove_work"),
+		Callback: d.removeWorkEvent,
+		Logger:   logger,
+	}
+
+	d.masterUpdateRequiredWork = ticker.TickerFunc{
+		C:      d.ctx,
+		Logger: logger,
+		D:      d.conf.updateAssignments,
+		F:      d.masterUpdateRequiredWorkFunc,
+	}
+	d.workerRectifyAssignedWork = ticker.TickerFunc{
+		C:      d.ctx,
+		Logger: logger,
+		D:      d.conf.compareKeys,
+		F:      d.workerRectifyAssignedWorkFunc,
+	}
+	d.masterPing = ticker.TickerFunc{
+		C:      d.ctx,
+		Logger: logger,
+		D:      d.conf.masterPing,
+		F:      d.masterPingFunc,
+	}
+	d.workerPing = ticker.TickerFunc{
+		C:      d.ctx,
+		Logger: logger,
+		D:      d.conf.workerPing,
+		F:      d.workerPingFunc,
+	}
+
+	d.knownWork = set.New[string]()
+	ObserveGauge(DividerAssignedItemsGauge, d.conf.metricsName, d.knownWork.Len())
+
+	d.conf.logger(ctx).Info("Starting worker", slog.String("divider.id", d.conf.instanceID))
+
+	//add workers to work holder
+	err := d.storage.UpdateTimeoutForWorkers(ctx, d.getWorkerNodeKeys())
+	if err != nil {
+		d.conf.logger(ctx).Panic("failed to update timeout for workers", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+
+	//start all listeners and tickers.
+	d.newWorker.Listen()
+	d.removeWorker.Listen()
+	d.newWork.Listen()
+	d.removeWork.Listen()
+
+	err = d.masterUpdateRequiredWork.Do()
+	if err != nil {
+		d.conf.logger(ctx).Panic("failed to start ticker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+	err = d.workerRectifyAssignedWork.Do()
+	if err != nil {
+		d.conf.logger(ctx).Panic("failed to start ticker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+	err = d.masterPing.Do()
+	if err != nil {
+		d.conf.logger(ctx).Panic("failed to start ticker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+	err = d.workerPing.Do()
+	if err != nil {
+		d.conf.logger(ctx).Panic("failed to start ticker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+
+	d.masterPing.F()
+	d.workerPing.F()
+	d.masterUpdateRequiredWork.F()
+	d.workerRectifyAssignedWork.F()
+
+	//inform the other nodes to check their work list for work & start.stop as appropriate.
+	err = d.newWorker.Publish(ctx, d.conf.instanceID)
+	if err != nil {
+		d.conf.logger(ctx).Error("failed to publish removing of workers from work list", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+	//No need to perform manual work rectification as this node will automatically rectify on getting the new worker event.
+
 }
 
 // Stop begins the process of stopping processing of all assigned keys.
 // Releasing these keys via stop allows them to immediately be picked up by other nodes.
 // Start must be called to begin picking up work keys again.
-func (r *Divider) Stop() {
-	r.mux.Lock()
-	r.stop()
-	r.mux.Unlock()
-}
+func (d *dividerWorker) StopWorker(ctx context.Context) {
 
-// Close shuts down, closes and cleans up the process.
-// If called before flushed, processing keys will be timed out instead of released.
-func (r *Divider) Close() {
-	r.mux.Lock()
-	r.close()
-	r.mux.Unlock()
-}
-
-// GetAssignedProcessingArray returns a string array that represents the keys that this node is set to process.
-func (r *Divider) GetAssignedProcessingArray() []string {
-	return r.currentKeys
-}
-
-// GetReceiveStartProcessingChan returns a channel of strings.
-// The string from this channel represents a key to a processable entity.
-// This particular channel is for receiving keys that this node is to begin processing.
-func (r *Divider) GetReceiveStartProcessingChan() <-chan string {
-	if r.startChan == nil {
-		r.startChan = make(chan string)
+	if d.ctx == nil {
+		return
 	}
-	return r.startChan
-}
 
-// GetReceiveStopProcessingChan returns a channel of strings.
-// The string from this channel represents a key to a processable entity.
-// This particular channel is for receiving keys that this node is to stop processing.
-func (r *Divider) GetReceiveStopProcessingChan() <-chan string {
-	if r.stopChan == nil {
-		r.stopChan = make(chan string)
-	}
-	return r.stopChan
-}
+	//close all listeners/tickers
+	d.cancel()
+	d.ctx = nil
+	d.cancel = nil
 
-// SendStopProcessing takes in a string of a key that this node is no longer processing.
-// This is to be used to release the processing to another node.
-// To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
-func (r *Divider) StopProcessing(key string) error {
-	err := r.r.RemoveWork(r.done, key)
+	//remove workers from work holder.
+	err := d.storage.RemoveWorkers(ctx, d.getWorkerNodeKeys())
 	if err != nil {
-		return err
+		d.conf.logger(ctx).Error("failed to remove workers from work list", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 	}
-	r.compareKeys()
+
+	//send out event that workers are being removed and to re-calculate.
+	err = d.removeWorker.Publish(ctx, d.conf.instanceID)
+	if err != nil {
+		d.conf.logger(ctx).Error("failed to publish removing of workers from work list", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+
+	//reset known work here as well so that I cant accidentally pull the old work from the iterator.
+	d.knownWork = set.New[string]()
+	ObserveGauge(DividerAssignedItemsGauge, d.conf.metricsName, d.knownWork.Len())
+}
+
+// StopProcessing takes in a string of a key that this node is no longer processing.
+// This is to be used to disable the work temporairly. Should be used when the work fetcher will not return the work anymore.
+func (d *dividerWorker) StopProcessing(ctx context.Context, works ...string) error {
+	start := time.Now()
+	err := d.storage.RemoveWorkFromDividedWork(ctx, works)
+	if err != nil {
+		return errors.Wrap(err, "failed to Remove Work From Divided Work")
+	}
+	for _, work := range works {
+		err = d.removeWork.Publish(ctx, work)
+		if err != nil {
+			return errors.Wrap(err, "failed to publish work removal")
+		}
+	}
+
+	ObserveDuration(StopProcessingTime, d.conf.metricsName, time.Since(start))
+	ObserveInc(StopProcessingKeyCount, d.conf.metricsName, len(works))
+
 	return nil
 }
 
-// SendStopProcessing takes in a string of a key that this node is no longer processing.
-// This is to be used to release the processing to another node.
-// To confirm that the processing stoppage is completed, use ConfirmStopProcessing instead.
-func (r *Divider) StartProcessing(key string) error {
-	return r.r.AddWork(r.done, key)
-}
+// StartProcessing adds this key to the list of work to be completed. This will temporairly force a worker to start working on the work.
+// Should be used when the work fetcher will start returning the work from now on.
+func (d *dividerWorker) StartProcessing(ctx context.Context, works ...string) error {
+	start := time.Now()
 
-// start the listeners/watchers for updating keys.
-func (r *Divider) start() {
+	err := d.storage.AddWorkToDividedWork(ctx, works)
+	if err != nil {
+		return errors.Wrap(err, "failed to Add Work To Divided Work")
+	}
+	for _, work := range works {
+		d.conf.logger(ctx).Debug("sending start processing for: "+work, slog.String("divider.id", d.conf.instanceID))
 
-	if r.done != nil {
-		return
+		err = d.newWork.Publish(ctx, work)
+		if err != nil {
+			return errors.Wrap(err, "failed to publish work start")
+		}
 	}
 
-	//TODO0 replace all calls to r.done with active timeout.
-	ctx, cancel := context.WithCancel(context.Background())
-	r.done = ctx
-	r.doneCancel = cancel
-	r.currentKeys = make([]string, 0)
-
-	r.watch()
-
+	ObserveDuration(StartProcessingTime, d.conf.metricsName, time.Since(start))
+	ObserveInc(StartProcessingKeyCount, d.conf.metricsName, len(works))
+	return nil
 }
 
-// stop the updater for watching for keys.
-func (r *Divider) stop() {
-
-	r.doneCancel()
-	r.done = nil
-	r.doneCancel = nil
-	r.currentKeys = make([]string, 0)
+// returns all work assigned to this particular divider node.
+// this method does not update the work list, and only pulls down the most recent work list.
+func (d *dividerWorker) GetWork(ctx context.Context) (iter.Seq[string], error) {
+	return d.knownWork.Iterator(), nil
 }
 
-func (r *Divider) close() {
-	r.informer.Errorf("Close call unnecessary for Redis Divider.")
-	//Nothing happens here in this particular implementation as the connection to redis is passed in.
+//Events and tickers
+
+// force refresh of work, and if necessary, drop any work no-longer assigned to me.
+func (d *dividerWorker) newWorkerEvent(ctx context.Context, key string) {
+	start := time.Now()
+
+	d.conf.logger(ctx).Debug("newWorkerEvent triggered: "+key, slog.String("divider.id", d.conf.instanceID))
+	err := d.rectifyWork(ctx)
+	if err != nil {
+		d.conf.logger(ctx).Error("failed to rectify work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+
+	ObserveDuration(NewWorkerEventTime, d.conf.metricsName, time.Since(start))
 }
 
-// goes through and adds compares the keys that the divider currently has to the keys that it should have
-// It then outputs the updated keys to the respective channels
-// This is the thing that should be run if there is work completed.
-func (r *Divider) compareKeys() {
+// grab new work and check if a new master needs to be created.
+func (d *dividerWorker) removeWorkerEvent(ctx context.Context, key string) {
+	start := time.Now()
+
+	d.conf.logger(ctx).Debug("removeWorkerEvent triggered: "+key, slog.String("divider.id", d.conf.instanceID))
+	err := d.rectifyWork(ctx)
+	if err != nil {
+		d.conf.logger(ctx).Error("failed to rectify work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+
+	ObserveDuration(RemoveWorkerEventTime, d.conf.metricsName, time.Since(start))
+}
+
+// check if work belongs to me and if needed, start it.
+func (d *dividerWorker) newWorkEvent(ctx context.Context, key string) {
+	start := time.Now()
+
+	d.conf.logger(ctx).Debug("newWorkEvent triggered: "+key, slog.String("divider.id", d.conf.instanceID))
+	for _, v := range d.getWorkerNodeKeys() {
+		inRange, err := d.storage.CheckWorkInKeyRange(ctx, v, key)
+		if err != nil {
+			d.conf.logger(ctx).Error("failed to check if work is in the range of this worker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+			return
+		}
+		if inRange {
+			err = d.conf.starter(ctx, key)
+			if err != nil {
+				d.conf.logger(ctx).Error("failed to execute starter", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+				return
+			}
+
+			d.knownWork.Add(key)
+			ObserveGauge(DividerAssignedItemsGauge, d.conf.metricsName, d.knownWork.Len())
+
+			return
+		}
+	}
+	d.conf.logger(ctx).Debug("newWorkEvent not in range: "+key, slog.String("divider.id", d.conf.instanceID))
+
+	ObserveDuration(NewWorkEventTime, d.conf.metricsName, time.Since(start))
+}
+
+// check if I am running the work, and if needed, remove it from my list of things to work on.
+func (d *dividerWorker) removeWorkEvent(ctx context.Context, key string) {
+	start := time.Now()
+
+	d.conf.logger(ctx).Debug("removeWorkEvent triggered: "+key, slog.String("divider.id", d.conf.instanceID))
+	if d.knownWork.Contains(key) {
+		err := d.conf.stopper(ctx, key)
+		if err != nil {
+			d.conf.logger(ctx).Error("failed to execute stopper", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+			return
+		}
+
+		d.knownWork.Remove(key)
+		ObserveGauge(DividerAssignedItemsGauge, d.conf.metricsName, d.knownWork.Len())
+
+	}
+
+	ObserveDuration(RemoveWorkEventTime, d.conf.metricsName, time.Since(start))
+}
+
+// run (master only) the work to update the list of all work required. Will not output that the work is
+func (d *dividerWorker) masterUpdateRequiredWorkFunc() {
 	start := time.Now()
 	defer func() {
-		if rec := recover(); rec != nil {
-			r.informer.Errorf("Forced to recover from panic in compare keys: %v", rec)
-		}
+		ObserveDuration(MasterUpdateWorkTime, d.conf.metricsName, time.Since(start))
 	}()
 
-	//take in the keys from the remote, and compare them to the list of current keys. if there are any changes, pipe them to the listener.
-	currentWork := r.getAssignedProcessingArray()
+	d.conf.logger(d.ctx).Debug("masterUpdateRequiredWorkFunc triggered", slog.String("divider.id", d.conf.instanceID))
+	masterKey := fmt.Sprintf("%s:%s", d.conf.rootKey, "master")
 
-	add, remove := getToRemoveToKeep(r.currentKeys, currentWork)
-
-	//send out keys that need to be started
-	for _, key := range add {
-		if r.startChan != nil {
-			r.startChan <- key
-		}
-	}
-
-	//send out keys thjat need to be stopped
-	for _, key := range remove {
-		if r.stopChan != nil {
-			r.stopChan <- key
-		}
-	}
-
-	r.currentKeys = currentWork
-
-	if r.metrics != nil && r.metrics.CompareKeysTime != nil {
-		r.metrics.CompareKeysTime.Observe(float64(time.Since(start)) / float64(time.Second))
-	}
-
-	if r.metrics != nil && r.metrics.AssignedWork != nil {
-		r.metrics.AssignedWork.Set(float64(len(currentWork)))
-	}
-}
-
-func (r *Divider) watch() {
-
-	//start the timer for saying this node is still connected.
-	ticker.TickerFunc{
-		C:      r.done,
-		D:      time.Millisecond * 500,
-		Logger: r.informer,
-		F:      r.updatePing,
-	}.Do()
-
-	//start the timer for updating the work if work updating is centralized.
-	ticker.TickerFunc{
-		C:      r.done,
-		D:      r.updateAssignmentsDuration,
-		Logger: r.informer,
-		F:      r.updateAssignments,
-	}.Do()
-
-	//get the work that this node needs to do.
-	ticker.TickerFunc{
-		C:      r.done,
-		D:      r.compareKeysDuration,
-		Logger: r.informer,
-		F:      r.compareKeys,
-	}.Do()
-
-}
-
-// returns the list of things that this node is supposed to watch.
-func (r *Divider) getAssignedProcessingArray() []string {
-	workers := r.getWorkerList()
-
-	var err error
-	total := 0
-	outWork := make([][]string, len(workers))
-	for i, v := range workers {
-		outWork[i], err = r.r.GetFollowingWork(r.done, v)
-		if err != nil {
-			r.informer.Errorf("failed to get work: %s", err.Error())
-			return []string{}
-		}
-		total += len(outWork[i])
-	}
-
-	work := make([]string, 0, total)
-
-	for _, v := range outWork {
-		work = append(work, v...)
-	}
-
-	return work
-}
-
-func (r *Divider) getWorkerList() []string {
-	z := make([]string, r.nodecount)
-	for i := 0; i < r.nodecount; i++ {
-		z[i] = fmt.Sprintf("%s:%d", r.instanceName, i)
-	}
-	return z
-}
-
-// updatePing is used to consistently tell the system that the worker is online, and listening to work.
-func (r *Divider) updatePing() {
-
-	defer func() {
-		if rec := recover(); rec != nil {
-			r.informer.Errorf("Forced to recover from panic in update Ping: %v", r)
-		}
-	}()
-
-	//update this nodes workers to be still connected.
-	err := r.r.UpdateWorkers(r.done, r.getWorkerList())
+	//check the master key.
+	master, err := d.client.Get(d.ctx, masterKey).Result()
 	if err != nil {
-		r.informer.Errorf("failed to update workers: %s", err.Error())
+		d.conf.logger(d.ctx).Panic("Error getting current master", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		return
+	}
+	//if not master, dont do the work fetcher.
+	if master != d.conf.instanceID {
 		return
 	}
 
-	//set the master key to this value if it does not exist.
-	set, err := r.redis.SetNX(r.done, r.masterKey, r.instanceName, r.masterTimeout).Result()
+	//Get all the newWork that needs to be assigned.
+	newWork, err := d.conf.workFetcher(d.ctx)
 	if err != nil {
-		r.informer.Errorf("update if master does not exist error: %s!", err.Error())
+		d.conf.logger(d.ctx).Panic("failed to execute work fetcher", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		return
+	}
+
+	//Add the work to the list of work in the system.
+	err = d.storage.AddWorkToDividedWork(d.ctx, newWork)
+	if err != nil {
+		d.conf.logger(d.ctx).Panic("failed to add work to divided work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		return
+	}
+
+	//get existing work
+	existingWork, err := d.storage.GetAllWork(d.ctx)
+	if err != nil {
+		d.conf.logger(d.ctx).Panic("failed to get list of all work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		return
+	}
+
+	//determine what work to remove
+	_, remove := getToRemoveToKeep(existingWork, newWork)
+
+	//remove all that work
+	err = d.storage.RemoveWorkFromDividedWork(d.ctx, remove)
+	if err != nil {
+		d.conf.logger(d.ctx).Panic("failed to remove the old work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		return
+	}
+
+	//note: Not triggering the add work event as that event should be triggered manually by the add work call, not by this.
+	//The work will be picked up by the rectify call later.
+}
+
+// get work assigned to this node, compare with known work, and start/stop all work as needed.
+func (d *dividerWorker) workerRectifyAssignedWorkFunc() {
+	start := time.Now()
+	defer func() {
+		ObserveDuration(WorkerRectifyTime, d.conf.metricsName, time.Since(start))
+	}()
+
+	d.conf.logger(d.ctx).Debug("workerRectifyAssignedWorkFunc triggered", slog.String("divider.id", d.conf.instanceID))
+	err := d.rectifyWork(d.ctx)
+	if err != nil {
+		d.conf.logger(d.ctx).Error("failed to rectify work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+}
+
+// set master as still attached
+func (d *dividerWorker) masterPingFunc() {
+	start := time.Now()
+	defer func() {
+		ObserveDuration(MasterPingTime, d.conf.metricsName, time.Since(start))
+	}()
+
+	// d.conf.logger(d.ctx).Debug("masterPingFunc triggered")
+	masterKey := fmt.Sprintf("%s:%s", d.conf.rootKey, "master")
+	//set the master key to this value if it does not exist.
+	set, err := d.client.SetNX(d.ctx, masterKey, d.conf.instanceID, d.conf.masterTimeout).Result()
+	if err != nil {
+		d.conf.logger(d.ctx).Panic("Error updating node master", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 		return
 	}
 
 	if set {
-		r.informer.Infof("The master was set to this node: %s", r.instanceName)
+		d.conf.logger(d.ctx).Info("Master set to this node", slog.String("divider.id", d.conf.instanceID))
 	}
 
 	//check the master key.
-	master, err := r.redis.Get(r.done, r.masterKey).Result()
+	master, err := d.client.Get(d.ctx, masterKey).Result()
 	if err != nil {
-		r.informer.Errorf("get current master error: %s!", err.Error())
+		d.conf.logger(d.ctx).Panic("Error getting current master", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 		return
 	}
 
-	//if this is the master, run the update (setting the timeout to 3 seconds)
-	if master == r.instanceName {
-		_, err = r.redis.Set(r.done, r.masterKey, r.instanceName, r.masterTimeout).Result()
+	//if this is the master, run the update to keep the master inline.
+	if master == d.conf.instanceID {
+		_, err = d.client.Set(d.ctx, masterKey, d.conf.instanceID, d.conf.masterTimeout).Result()
 		if err != nil {
-			r.informer.Errorf("update master timeout error: %s!", err.Error())
+			d.conf.logger(d.ctx).Panic("Error updating master timeout", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 			return
 		}
 	}
-
 }
 
-// updates all assignments if master.
-func (r *Divider) updateAssignments() {
-
+// update nodes in storage as still attached.
+func (d *dividerWorker) workerPingFunc() {
 	start := time.Now()
-	//only run if workfetcher actually exists.
-	if r.workFetcher == nil {
-		return
-	}
-
 	defer func() {
-		if rec := recover(); rec != nil {
-			r.informer.Errorf("Forced to recover from panic in update Assignments: %+v: %+v", r, rec)
-		}
+		ObserveDuration(WorkerPingTime, d.conf.metricsName, time.Since(start))
 	}()
-
-	//check the master key.
-	master, err := r.redis.Get(r.done, r.masterKey).Result()
+	// d.conf.logger(d.ctx).Debug("workerPingFunc triggered")
+	//add workers to work holder
+	err := d.storage.UpdateTimeoutForWorkers(d.ctx, d.getWorkerNodeKeys())
 	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return
-		}
-		r.informer.Errorf("get current master error: %s!", err.Error())
-		return
-	}
-
-	//if this is the master, run the update
-	if master == r.instanceName {
-
-		err = r.updateData()
-		if err != nil {
-			r.informer.Errorf("Error when updating data: %s!", err.Error())
-			return
-		}
-		if r.metrics != nil && r.metrics.UpdateAssignmentsTime != nil {
-			r.metrics.UpdateAssignmentsTime.Observe(float64(time.Since(start)) / float64(time.Second))
-		}
+		d.conf.logger(d.ctx).Panic("failed to update timeout for workers", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 	}
 }
 
-// updateData does the work to keep track of the work distribution.
-// This work should only be done by the master.
-func (r *Divider) updateData() error {
-
-	//only run if workfetcher actually exists.
-	if r.workFetcher == nil {
-		return nil
+// helpers
+func (d *dividerWorker) getWorkerNodeKeys() []string {
+	workers := []string{}
+	for i := range d.conf.nodeCount {
+		workers = append(workers, fmt.Sprintf("%s:%d", d.conf.instanceID, i))
 	}
-
-	work := r.workFetcher(r.done)
-	if work == nil {
-		return nil
-	}
-
-	knownWork, err := r.r.GetAllWork(r.done)
-	if err != nil {
-		return err
-	}
-
-	add, remove := getToRemoveToKeep(knownWork, work)
-
-	err = r.r.AddWorks(r.done, add)
-	if err != nil {
-		return err
-	}
-
-	for _, v := range remove {
-		r.r.RemoveWork(r.done, v)
-	}
-
-	return nil
+	return workers
 }
 
 func getToRemoveToKeep(oldWork, newWork []string) (add, remove []string) {
@@ -481,4 +445,68 @@ func getToRemoveToKeep(oldWork, newWork []string) (add, remove []string) {
 	}
 
 	return add, remove
+}
+
+// take existing work, and compare to expected work.
+func (d *dividerWorker) rectifyWork(ctx context.Context) (err error) {
+	oldWork := d.knownWork.Clone()
+	newWork, err := d.getKnownWork(ctx)
+	if err != nil {
+		return errors.Wrap(err, "failed to get known work")
+	}
+
+	toRemove := oldWork.Difference(newWork)
+	toAdd := newWork.Difference(oldWork)
+	// pp.Println(d.conf.instanceID, "work, old:", oldWork.Array(), "new: ", newWork.Array())
+
+	// pp.Println(d.conf.instanceID, "toRemove", toRemove.Array())
+	for key := range toRemove.Iterator() {
+		err = d.conf.stopper(ctx, key)
+		if err != nil {
+			d.conf.logger(ctx).Error("failed to execute stopper, not removing from known work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+			continue
+		}
+		d.knownWork.Remove(key)
+	}
+
+	// pp.Println(d.conf.instanceID, "toAdd", toAdd.Array())
+	for key := range toAdd.Iterator() {
+		err = d.conf.starter(ctx, key)
+		if err != nil {
+			d.conf.logger(ctx).Error("failed to execute starter, not adding to known work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+			continue
+		}
+		d.knownWork.Add(key)
+	}
+
+	ObserveGauge(DividerAssignedItemsGauge, d.conf.metricsName, d.knownWork.Len())
+
+	return nil
+}
+
+func (d *dividerWorker) getKnownWork(ctx context.Context) (set.Set[string], error) {
+
+	keys := d.getWorkerNodeKeys()
+	var wrapperErr error
+	allWorkArray := divider.Map(keys, func(key string) []string {
+		data, err := d.storage.GetWorkFromKeyToNextWorkerKey(ctx, key)
+		if err != nil {
+			wrapperErr = err
+			return nil
+		}
+		return data
+	})
+
+	if wrapperErr != nil {
+		return set.Set[string]{}, errors.Wrap(wrapperErr, "failed to get one or more sets of work for worker")
+	}
+
+	s := set.New[string]()
+	//Add all the work to the knownWork set
+	for _, nodeWorkArray := range allWorkArray {
+		s.Add(nodeWorkArray...)
+	}
+
+	return s, nil
+
 }
