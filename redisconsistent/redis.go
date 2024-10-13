@@ -35,7 +35,7 @@ func (d *dividerWorker) StartWorker(ctx context.Context) {
 		panic("missing work fetcher func")
 	}
 
-	d.ctx, d.cancel = context.WithCancel(context.WithoutCancel(ctx))
+	d.ctx, d.cancel = context.WithCancel(ctx)
 
 	var logger divider.LoggerGen
 	//start tickers and listeners
@@ -92,6 +92,8 @@ func (d *dividerWorker) StartWorker(ctx context.Context) {
 		D:      d.conf.workerPing,
 		F:      d.workerPingFunc,
 	}
+
+	InitMetrics(d.conf.metricsName)
 
 	d.knownWork = set.New[string]()
 	ObserveGauge(DividerAssignedItemsGauge, d.conf.metricsName, d.knownWork.Len())

@@ -126,3 +126,74 @@ func ObserveGauge(metric *prometheus.GaugeVec, name string, value int) {
 
 	met.Set(float64(value))
 }
+
+func InitMetrics(name string) {
+
+	var err error
+
+	_, err = NewWorkerEventTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = RemoveWorkerEventTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = NewWorkEventTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = RemoveWorkEventTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = MasterUpdateWorkTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = WorkerRectifyTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = MasterPingTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = WorkerPingTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = StartProcessingTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = StopProcessingTime.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = StartProcessingKeyCount.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = StopProcessingKeyCount.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+	_, err = DividerAssignedItemsGauge.GetMetricWithLabelValues(name)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to get metric"))
+	}
+
+}
