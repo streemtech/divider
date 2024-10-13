@@ -24,6 +24,17 @@ func (d *dividerWorker) StartWorker(ctx context.Context) {
 		return
 	}
 
+	//can not start worker if expected functions are nil.
+	if d.conf.starter == nil {
+		panic("missing starter func")
+	}
+	if d.conf.stopper == nil {
+		panic("missing stopper func")
+	}
+	if d.conf.workFetcher == nil {
+		panic("missing work fetcher func")
+	}
+
 	d.ctx, d.cancel = context.WithCancel(context.WithoutCancel(ctx))
 
 	var logger divider.LoggerGen

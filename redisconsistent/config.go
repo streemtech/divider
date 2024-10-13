@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/pkg/errors"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/streemtech/divider"
@@ -150,18 +149,6 @@ func New(client redis.UniversalClient, rootKey string, Opts ...DividerOpt) (divi
 
 	for _, v := range Opts {
 		v(conf)
-	}
-
-	if conf.starter == nil {
-		return nil, errors.New("missing starter func")
-	}
-
-	if conf.stopper == nil {
-		return nil, errors.New("missing stopper func")
-	}
-
-	if conf.workFetcher == nil {
-		return nil, errors.New("missing work fetcher func")
 	}
 
 	return &dividerWorker{
