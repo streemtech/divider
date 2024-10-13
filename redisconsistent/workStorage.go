@@ -146,7 +146,7 @@ func (r *workStorageImpl) removeTimedOutWorkers(ctx context.Context) error {
 	}
 
 	//for all of those workers, remove them.
-	return r.RemoveWorkers(ctx, divider.Map(toRemove, func(key redis.Z) string { return key.Member }))
+	return r.RemoveWorkers(ctx, divider.Map(toRemove, func(key redis.Z) string { return key.Member.(string) }))
 }
 
 // given a score, find the score of the next potential worker node. Will automatically wrap the scores.
