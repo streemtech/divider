@@ -30,6 +30,4 @@ type dividerWorker struct {
 
 	masterUpdateRequiredWork  ticker.TickerFunc
 	workerRectifyAssignedWork ticker.TickerFunc
-	masterPing                ticker.TickerFunc
-	workerPing                ticker.TickerFunc
 }

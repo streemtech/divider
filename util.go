@@ -36,7 +36,7 @@ type Logger interface {
 	Debug(msg string, args ...slog.Attr)
 	Info(msg string, args ...slog.Attr)
 	Error(msg string, args ...slog.Attr)
-	Panic(msg string, args ...slog.Attr)
+	Panic(msg string, err error, args ...slog.Attr)
 }
 
 func DefaultLogger(ctx context.Context) Logger {
@@ -71,8 +71,8 @@ func (d *defaultLogger) Error(msg string, args ...slog.Attr) {
 
 	l.ErrorContext(d.ctx, msg)
 }
-func (d *defaultLogger) Panic(msg string, args ...slog.Attr) {
-	l := slog.Default()
+func (d *defaultLogger) Panic(msg string, err error, args ...slog.Attr) {
+	l := slog.Default().With(slog.String("err.error", err.Error()))
 	for _, v := range args {
 		l = l.With(v)
 	}

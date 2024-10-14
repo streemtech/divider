@@ -37,7 +37,7 @@ func (s *StreamListener) Listen() {
 				if errors.Is(err, context.Canceled) {
 					return
 				}
-				s.Logger(s.Ctx).Panic("failed to read data from stream", slog.String("err.error", err.Error()), slog.String("streamlistener.stream", s.Key))
+				s.Logger(s.Ctx).Panic("failed to read data from stream", err, slog.String("streamlistener.stream", s.Key))
 			}
 
 			//for all events, get teh data and send it to the channel.

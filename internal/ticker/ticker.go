@@ -3,7 +3,6 @@ package ticker
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/streemtech/divider"
@@ -33,14 +32,15 @@ func (t TickerFunc) Do() error {
 	ticker := time.NewTicker(t.D)
 
 	go func() {
-		defer func() {
-			ticker.Stop()
-			if e := recover(); e != nil {
-				if t.Logger != nil {
-					t.Logger(t.C).Error("Ran into exception when running ticker function", slog.String("err.panic", fmt.Sprintf("%+v", e)))
-				}
-			}
-		}()
+		//Intentionally disabling the panic catch as the ticker will be disabled, which causes unexpected problems.
+		// defer func() {
+		// 	ticker.Stop()
+		// 	if e := recover(); e != nil {
+		// 		if t.Logger != nil {
+		// 			t.Logger(t.C).Error("Ran into exception when running ticker function", slog.String("err.panic", fmt.Sprintf("%+v", e)))
+		// 		}
+		// 	}
+		// }()
 		for {
 			select {
 			case <-ticker.C:

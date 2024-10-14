@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	// "github.com/k0kubun/pp/v3"
 	"github.com/pkg/errors"
 
 	"github.com/streemtech/divider"
@@ -80,18 +81,6 @@ func (d *dividerWorker) StartWorker(ctx context.Context) {
 		D:      d.conf.compareKeys,
 		F:      d.workerRectifyAssignedWorkFunc,
 	}
-	d.masterPing = ticker.TickerFunc{
-		C:      d.ctx,
-		Logger: logger,
-		D:      d.conf.masterPing,
-		F:      d.masterPingFunc,
-	}
-	d.workerPing = ticker.TickerFunc{
-		C:      d.ctx,
-		Logger: logger,
-		D:      d.conf.workerPing,
-		F:      d.workerPingFunc,
-	}
 
 	InitMetrics(d.conf.metricsName)
 
@@ -103,7 +92,7 @@ func (d *dividerWorker) StartWorker(ctx context.Context) {
 	//add workers to work holder
 	err := d.storage.UpdateTimeoutForWorkers(ctx, d.getWorkerNodeKeys())
 	if err != nil {
-		d.conf.logger(ctx).Panic("failed to update timeout for workers", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(ctx).Panic("failed to update timeout for workers", err, slog.String("divider.id", d.conf.instanceID))
 	}
 
 	//start all listeners and tickers.
@@ -114,23 +103,13 @@ func (d *dividerWorker) StartWorker(ctx context.Context) {
 
 	err = d.masterUpdateRequiredWork.Do()
 	if err != nil {
-		d.conf.logger(ctx).Panic("failed to start ticker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(ctx).Panic("failed to start ticker", err, slog.String("divider.id", d.conf.instanceID))
 	}
 	err = d.workerRectifyAssignedWork.Do()
 	if err != nil {
-		d.conf.logger(ctx).Panic("failed to start ticker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
-	}
-	err = d.masterPing.Do()
-	if err != nil {
-		d.conf.logger(ctx).Panic("failed to start ticker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
-	}
-	err = d.workerPing.Do()
-	if err != nil {
-		d.conf.logger(ctx).Panic("failed to start ticker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(ctx).Panic("failed to start ticker", err, slog.String("divider.id", d.conf.instanceID))
 	}
 
-	d.masterPing.F()
-	d.workerPing.F()
 	d.masterUpdateRequiredWork.F()
 	d.workerRectifyAssignedWork.F()
 
@@ -309,52 +288,53 @@ func (d *dividerWorker) masterUpdateRequiredWorkFunc() {
 	}()
 
 	d.conf.logger(d.ctx).Debug("masterUpdateRequiredWorkFunc triggered", slog.String("divider.id", d.conf.instanceID))
-	masterKey := fmt.Sprintf("%s:%s", d.conf.rootKey, "master")
 
-	//check the master key.
-	master, err := d.client.Get(d.ctx, masterKey).Result()
-	if err != nil {
-		d.conf.logger(d.ctx).Panic("Error getting current master", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
-		return
-	}
 	//if not master, dont do the work fetcher.
-	if master != d.conf.instanceID {
+	if !d.materUpdate(d.ctx) {
 		return
 	}
 
 	//Get all the newWork that needs to be assigned.
 	newWork, err := d.conf.workFetcher(d.ctx)
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("failed to execute work fetcher", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(d.ctx).Panic("failed to execute work fetcher", err, slog.String("divider.id", d.conf.instanceID))
 		return
 	}
 
 	//Add the work to the list of work in the system.
 	err = d.storage.AddWorkToDividedWork(d.ctx, newWork)
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("failed to add work to divided work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(d.ctx).Panic("failed to add work to divided work", err, slog.String("divider.id", d.conf.instanceID))
 		return
 	}
 
 	//get existing work
 	existingWork, err := d.storage.GetAllWork(d.ctx)
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("failed to get list of all work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(d.ctx).Panic("failed to get list of all work", err, slog.String("divider.id", d.conf.instanceID))
 		return
 	}
 
 	//determine what work to remove
 	_, remove := getToRemoveToKeep(existingWork, newWork)
 
+	// pp.Println(d.conf.metricsName, existingWork, newWork, remove)
 	//remove all that work
 	err = d.storage.RemoveWorkFromDividedWork(d.ctx, remove)
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("failed to remove the old work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(d.ctx).Panic("failed to remove the old work", err, slog.String("divider.id", d.conf.instanceID))
 		return
 	}
 
+	for _, v := range remove {
+		err = d.removeWork.Publish(d.ctx, v)
+		if err != nil {
+			d.conf.logger(d.ctx).Panic("failed to publish old work removal", err, slog.String("divider.id", d.conf.instanceID))
+		}
+	}
 	//note: Not triggering the add work event as that event should be triggered manually by the add work call, not by this.
 	//The work will be picked up by the rectify call later.
+	//Am manually calling the remove work as that should happen as soon as rectified if needed. (This can result in a double call, but thats ok in this case.)
 }
 
 // get work assigned to this node, compare with known work, and start/stop all work as needed.
@@ -369,56 +349,56 @@ func (d *dividerWorker) workerRectifyAssignedWorkFunc() {
 	if err != nil {
 		d.conf.logger(d.ctx).Error("failed to rectify work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 	}
+
+	d.workerPing(d.ctx)
 }
 
 // set master as still attached
-func (d *dividerWorker) masterPingFunc() {
-	start := time.Now()
-	defer func() {
-		ObserveDuration(MasterPingTime, d.conf.metricsName, time.Since(start))
-	}()
+func (d *dividerWorker) materUpdate(ctx context.Context) (isMaster bool) {
 
 	// d.conf.logger(d.ctx).Debug("masterPingFunc triggered")
 	masterKey := fmt.Sprintf("%s:%s", d.conf.rootKey, "master")
 	//set the master key to this value if it does not exist.
-	set, err := d.client.SetNX(d.ctx, masterKey, d.conf.instanceID, d.conf.masterTimeout).Result()
+	set, err := d.client.SetNX(ctx, masterKey, d.conf.instanceID, d.conf.masterTimeout).Result()
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("Error updating node master", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(ctx).Panic("Error updating node master", err, slog.String("divider.id", d.conf.instanceID))
 		return
 	}
 
 	if set {
-		d.conf.logger(d.ctx).Info("Master set to this node", slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(ctx).Info("Master set to this node", slog.String("divider.id", d.conf.instanceID))
 	}
 
 	//check the master key.
-	master, err := d.client.Get(d.ctx, masterKey).Result()
+	master, err := d.client.Get(ctx, masterKey).Result()
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("Error getting current master", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(ctx).Panic("Error getting current master", err, slog.String("divider.id", d.conf.instanceID))
 		return
 	}
 
 	//if this is the master, run the update to keep the master inline.
 	if master == d.conf.instanceID {
-		_, err = d.client.Set(d.ctx, masterKey, d.conf.instanceID, d.conf.masterTimeout).Result()
+		_, err = d.client.Set(ctx, masterKey, d.conf.instanceID, d.conf.masterTimeout).Result()
 		if err != nil {
-			d.conf.logger(d.ctx).Panic("Error updating master timeout", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+			d.conf.logger(ctx).Panic("Error updating master timeout", err, slog.String("divider.id", d.conf.instanceID))
 			return
 		}
+		return true
 	}
+	return false
 }
 
 // update nodes in storage as still attached.
-func (d *dividerWorker) workerPingFunc() {
+func (d *dividerWorker) workerPing(ctx context.Context) {
 	start := time.Now()
 	defer func() {
 		ObserveDuration(WorkerPingTime, d.conf.metricsName, time.Since(start))
 	}()
 	// d.conf.logger(d.ctx).Debug("workerPingFunc triggered")
 	//add workers to work holder
-	err := d.storage.UpdateTimeoutForWorkers(d.ctx, d.getWorkerNodeKeys())
+	err := d.storage.UpdateTimeoutForWorkers(ctx, d.getWorkerNodeKeys())
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("failed to update timeout for workers", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(d.ctx).Panic("failed to update timeout for workers", err, slog.String("divider.id", d.conf.instanceID))
 	}
 }
 
@@ -474,9 +454,11 @@ func (d *dividerWorker) rectifyWork(ctx context.Context) (err error) {
 
 	// pp.Println(d.conf.instanceID, "toRemove", toRemove.Array())
 	for key := range toRemove.Iterator() {
-		err = d.conf.stopper(ctx, key)
+		ctx2, can := context.WithTimeout(ctx, time.Second*5)
+		defer can()
+		err = d.conf.stopper(ctx2, key)
 		if err != nil {
-			d.conf.logger(ctx).Error("failed to execute stopper, not removing from known work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+			d.conf.logger(ctx2).Error("failed to execute stopper, not removing from known work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 			continue
 		}
 		d.knownWork.Remove(key)
@@ -484,9 +466,11 @@ func (d *dividerWorker) rectifyWork(ctx context.Context) (err error) {
 
 	// pp.Println(d.conf.instanceID, "toAdd", toAdd.Array())
 	for key := range toAdd.Iterator() {
-		err = d.conf.starter(ctx, key)
+		ctx2, can := context.WithTimeout(ctx, time.Second*5)
+		defer can()
+		err = d.conf.starter(ctx2, key)
 		if err != nil {
-			d.conf.logger(ctx).Error("failed to execute starter, not adding to known work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+			d.conf.logger(ctx2).Error("failed to execute starter, not adding to known work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 			continue
 		}
 		d.knownWork.Add(key)

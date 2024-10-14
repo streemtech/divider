@@ -52,13 +52,6 @@ var WorkerRectifyTime = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Help:      "Returns the length of time that rectifying the work assigned to this node took",
 	Buckets:   HistogramBuckets,
 }, []string{"divider"})
-var MasterPingTime = promauto.NewHistogramVec(prometheus.HistogramOpts{
-	Namespace: "streemtech",
-	Subsystem: "redis_work_divider",
-	Name:      "master_ping_time",
-	Help:      "Returns the length of time that updating the master took.",
-	Buckets:   HistogramBuckets,
-}, []string{"divider"})
 var WorkerPingTime = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
@@ -157,11 +150,6 @@ func InitMetrics(name string) {
 	}
 
 	_, err = WorkerRectifyTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = MasterPingTime.GetMetricWithLabelValues(name)
 	if err != nil {
 		panic(errors.Wrap(err, "failed to get metric"))
 	}
