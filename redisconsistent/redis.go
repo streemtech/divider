@@ -11,7 +11,6 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/streemtech/divider"
-	"github.com/streemtech/divider/internal/redisstreams"
 	"github.com/streemtech/divider/internal/set"
 	"github.com/streemtech/divider/internal/ticker"
 )
@@ -38,46 +37,25 @@ func (d *dividerWorker) StartWorker(ctx context.Context) {
 
 	d.ctx, d.cancel = context.WithCancel(ctx)
 
-	var logger divider.LoggerGen
 	//start tickers and listeners
-	d.newWorker = redisstreams.StreamListener{
-		Ctx:      d.ctx,
-		Client:   d.client,
-		Key:      fmt.Sprintf("%s:%s", d.conf.rootKey, "new_worker"),
-		Callback: d.newWorkerEvent,
-		Logger:   logger,
-	}
-	d.removeWorker = redisstreams.StreamListener{
-		Ctx:      d.ctx,
-		Client:   d.client,
-		Key:      fmt.Sprintf("%s:%s", d.conf.rootKey, "remove_worker"),
-		Callback: d.removeWorkerEvent,
-		Logger:   logger,
-	}
-	d.newWork = redisstreams.StreamListener{
-		Ctx:      d.ctx,
-		Client:   d.client,
-		Key:      fmt.Sprintf("%s:%s", d.conf.rootKey, "new_work"),
-		Callback: d.newWorkEvent,
-		Logger:   logger,
-	}
-	d.removeWork = redisstreams.StreamListener{
-		Ctx:      d.ctx,
-		Client:   d.client,
-		Key:      fmt.Sprintf("%s:%s", d.conf.rootKey, "remove_work"),
-		Callback: d.removeWorkEvent,
-		Logger:   logger,
-	}
+	d.newWorker.Ctx = d.ctx
+	d.newWorker.Callback = d.newWorkerEvent
+	d.removeWorker.Ctx = d.ctx
+	d.removeWorker.Callback = d.removeWorkerEvent
+	d.newWork.Ctx = d.ctx
+	d.newWork.Callback = d.newWorkEvent
+	d.removeWork.Ctx = d.ctx
+	d.removeWork.Callback = d.removeWorkEvent
 
 	d.masterUpdateRequiredWork = ticker.TickerFunc{
 		C:      d.ctx,
-		Logger: logger,
+		Logger: d.conf.logger,
 		D:      d.conf.updateAssignments,
 		F:      d.masterUpdateRequiredWorkFunc,
 	}
 	d.workerRectifyAssignedWork = ticker.TickerFunc{
 		C:      d.ctx,
-		Logger: logger,
+		Logger: d.conf.logger,
 		D:      d.conf.compareKeys,
 		F:      d.workerRectifyAssignedWorkFunc,
 	}

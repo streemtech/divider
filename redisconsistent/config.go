@@ -1,12 +1,14 @@
 package redisconsistent
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/streemtech/divider"
+	"github.com/streemtech/divider/internal/redisstreams"
 	"github.com/streemtech/divider/internal/set"
 )
 
@@ -20,13 +22,9 @@ type dividerConf struct {
 	starter     StarterFunc
 	stopper     StarterFunc
 
-	//how often the master updates itself
-	masterPing time.Duration
 	//how long the master reserves itself.
 	masterTimeout time.Duration
 
-	//how long the workers wait between pings in the storage
-	workerPing time.Duration
 	//how long the workers wait before counting a timeout.
 	workerTimeout time.Duration
 
@@ -95,24 +93,10 @@ func WithMasterTimeoutDuration(value time.Duration) DividerOpt {
 	}
 }
 
-// Time that masters will wait between updating their "im alive" statuses.
-func WithMasterPingTime(value time.Duration) DividerOpt {
-	return func(dc *dividerConf) {
-		dc.masterPing = value
-	}
-}
-
 // Time that a worker can be in the list after a ping and have not reported.
 func WithWorkerTimeoutDuration(value time.Duration) DividerOpt {
 	return func(dc *dividerConf) {
 		dc.workerTimeout = value
-	}
-}
-
-// Time that workers will wait between updating their "im alive" statuses.
-func WithWorkerPingTime(value time.Duration) DividerOpt {
-	return func(dc *dividerConf) {
-		dc.workerPing = value
 	}
 }
 
@@ -138,9 +122,7 @@ func New(client redis.UniversalClient, rootKey string, Opts ...DividerOpt) (divi
 		nodeCount:     10,
 		logger:        divider.DefaultLogger,
 		masterTimeout: time.Second * 10,
-		masterPing:    time.Second,
 		workerTimeout: time.Second * 10,
-		workerPing:    time.Second,
 
 		updateAssignments: time.Second * 10,
 		compareKeys:       time.Second * 10,
@@ -160,6 +142,35 @@ func New(client redis.UniversalClient, rootKey string, Opts ...DividerOpt) (divi
 			client:        client,
 			workerTimeout: conf.workerTimeout,
 			rootKey:       conf.rootKey,
+		},
+		//start tickers and listeners
+		newWorker: redisstreams.StreamListener{
+			// Ctx:    ctx,
+			Client: client,
+			Key:    fmt.Sprintf("%s:%s", conf.rootKey, "new_worker"),
+			// Callback: d.newWorkerEvent,
+			Logger: conf.logger,
+		},
+		removeWorker: redisstreams.StreamListener{
+			// Ctx:    ctx,
+			Client: client,
+			Key:    fmt.Sprintf("%s:%s", conf.rootKey, "remove_worker"),
+			// Callback: d.removeWorkerEvent,
+			Logger: conf.logger,
+		},
+		newWork: redisstreams.StreamListener{
+			// Ctx:    ctx,
+			Client: client,
+			Key:    fmt.Sprintf("%s:%s", conf.rootKey, "new_work"),
+			// Callback: d.newWorkEvent,
+			Logger: conf.logger,
+		},
+		removeWork: redisstreams.StreamListener{
+			// Ctx:    ctx,
+			Client: client,
+			Key:    fmt.Sprintf("%s:%s", conf.rootKey, "remove_work"),
+			// Callback: d.removeWorkEvent,
+			Logger: conf.logger,
 		},
 	}, nil
 }
