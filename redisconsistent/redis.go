@@ -114,8 +114,13 @@ func (d *dividerWorker) StopWorker(ctx context.Context) {
 	d.ctx = nil
 	d.cancel = nil
 
+	err := d.removeMaster(ctx)
+	if err != nil {
+		d.conf.logger(ctx).Error("failed to remove workers as master", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+	}
+
 	//remove workers from work holder.
-	err := d.storage.RemoveWorkers(ctx, d.getWorkerNodeKeys())
+	err = d.storage.RemoveWorkers(ctx, d.getWorkerNodeKeys())
 	if err != nil {
 		d.conf.logger(ctx).Error("failed to remove workers from work list", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 	}
@@ -185,6 +190,9 @@ func (d *dividerWorker) GetWork(ctx context.Context) (iter.Seq[string], error) {
 
 // force refresh of work, and if necessary, drop any work no-longer assigned to me.
 func (d *dividerWorker) newWorkerEvent(ctx context.Context, key string) {
+	if d.cancel == nil {
+		return
+	}
 	start := time.Now()
 
 	d.conf.logger(ctx).Debug("newWorkerEvent triggered: "+key, slog.String("divider.id", d.conf.instanceID))
@@ -198,9 +206,17 @@ func (d *dividerWorker) newWorkerEvent(ctx context.Context, key string) {
 
 // grab new work and check if a new master needs to be created.
 func (d *dividerWorker) removeWorkerEvent(ctx context.Context, key string) {
+	if d.cancel == nil {
+		return
+	}
 	start := time.Now()
 
 	d.conf.logger(ctx).Debug("removeWorkerEvent triggered: "+key, slog.String("divider.id", d.conf.instanceID))
+
+	//trigger a force update of the master
+	d.masterUpdateRequiredWorkFunc()
+
+	//rectify all of your work.
 	err := d.rectifyWork(ctx)
 	if err != nil {
 		d.conf.logger(ctx).Error("failed to rectify work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
@@ -211,6 +227,9 @@ func (d *dividerWorker) removeWorkerEvent(ctx context.Context, key string) {
 
 // check if work belongs to me and if needed, start it.
 func (d *dividerWorker) newWorkEvent(ctx context.Context, key string) {
+	if d.cancel == nil {
+		return
+	}
 	start := time.Now()
 
 	d.conf.logger(ctx).Debug("newWorkEvent triggered: "+key, slog.String("divider.id", d.conf.instanceID))
@@ -240,6 +259,9 @@ func (d *dividerWorker) newWorkEvent(ctx context.Context, key string) {
 
 // check if I am running the work, and if needed, remove it from my list of things to work on.
 func (d *dividerWorker) removeWorkEvent(ctx context.Context, key string) {
+	if d.cancel == nil {
+		return
+	}
 	start := time.Now()
 
 	d.conf.logger(ctx).Debug("removeWorkEvent triggered: "+key, slog.String("divider.id", d.conf.instanceID))
@@ -329,6 +351,28 @@ func (d *dividerWorker) workerRectifyAssignedWorkFunc() {
 	}
 
 	d.workerPing(d.ctx)
+}
+
+func (d *dividerWorker) removeMaster(ctx context.Context) (err error) {
+
+	masterKey := fmt.Sprintf("%s:%s", d.conf.rootKey, "master")
+
+	master, err := d.client.Get(ctx, masterKey).Result()
+	if err != nil {
+		d.conf.logger(ctx).Panic("Error getting current master", err, slog.String("divider.id", d.conf.instanceID))
+		return errors.Wrap(err, "failed to get current master")
+	}
+
+	//if this is the master, run the update to keep the master inline.
+	if master == d.conf.instanceID {
+		_, err = d.client.Del(ctx, masterKey).Result()
+
+		if err != nil {
+			d.conf.logger(ctx).Panic("deleting master key", err, slog.String("divider.id", d.conf.instanceID))
+			return errors.Wrap(err, "failed to delete master key")
+		}
+	}
+	return nil
 }
 
 // set master as still attached
