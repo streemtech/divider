@@ -34,9 +34,18 @@ func (s *StreamListener) Listen() {
 				Count:   1,
 			}).Result()
 			if err != nil {
+
 				if errors.Is(err, context.Canceled) {
 					return
 				}
+
+				//select to check for ending satement
+				select {
+				case <-s.Ctx.Done():
+					return
+				default:
+				}
+
 				s.Logger(s.Ctx).Panic("failed to read data from stream", err, slog.String("streamlistener.stream", s.Key))
 			}
 
