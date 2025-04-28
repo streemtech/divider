@@ -17,7 +17,7 @@ jobs:
     # tagPatch: ${{ steps.semver_parser.outputs.patch }}
     steps:
       - name: checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -26,24 +26,26 @@ jobs:
         run: git config --global url."https://x-oauth-basic:${{ secrets.GO_MODULES_TOKEN }}@github.com".insteadOf "https://github.com"
 
       - name: Setup Golang
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.23
+          go-version: 1.24
 
       - name: Cache go files
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
 
-      - name: Run Go Internal Tests
-        run: go test -v ./...
+      - name: Test
+        uses: robherley/go-test-action@v0
+        with:
+          testArguments: " -v ./..."
 
       - name: Bump version and push tag
         id: bump_tag
-        uses: anothrNick/github-tag-action@1.34.0
+        uses: anothrNick/github-tag-action@1.67.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WITH_V: true
