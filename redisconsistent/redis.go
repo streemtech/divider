@@ -142,11 +142,13 @@ func (d *dividerWorker) StopProcessing(ctx context.Context, works ...string) err
 	start := time.Now()
 	err := d.storage.RemoveWorkFromDividedWork(ctx, works)
 	if err != nil {
+		ObserveInc(RemoveWorkFromDividerError, d.conf.metricsName, 1)
 		return errors.Wrap(err, "failed to Remove Work From Divided Work")
 	}
 	for _, work := range works {
 		err = d.removeWork.Publish(ctx, work)
 		if err != nil {
+			ObserveInc(PublishRemoveWorkFromDividerError, d.conf.metricsName, 1)
 			return errors.Wrap(err, "failed to publish work removal")
 		}
 	}
@@ -164,6 +166,7 @@ func (d *dividerWorker) StartProcessing(ctx context.Context, works ...string) er
 
 	err := d.storage.AddWorkToDividedWork(ctx, works)
 	if err != nil {
+		ObserveInc(AddWorkToDividerError, d.conf.metricsName, 1)
 		return errors.Wrap(err, "failed to Add Work To Divided Work")
 	}
 	for _, work := range works {
@@ -171,6 +174,7 @@ func (d *dividerWorker) StartProcessing(ctx context.Context, works ...string) er
 
 		err = d.newWork.Publish(ctx, work)
 		if err != nil {
+			ObserveInc(PublishAddWorkToDividerError, d.conf.metricsName, 1)
 			return errors.Wrap(err, "failed to publish work start")
 		}
 	}
@@ -198,6 +202,7 @@ func (d *dividerWorker) newWorkerEvent(ctx context.Context, key string) {
 	d.conf.logger(ctx).Debug("newWorkerEvent triggered: "+key, slog.String("divider.id", d.conf.instanceID))
 	err := d.rectifyWork(ctx)
 	if err != nil {
+		ObserveInc(RectifyWorkError, d.conf.metricsName, 1)
 		d.conf.logger(ctx).Error("failed to rectify work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 	}
 
@@ -219,6 +224,7 @@ func (d *dividerWorker) removeWorkerEvent(ctx context.Context, key string) {
 	//rectify all of your work.
 	err := d.rectifyWork(ctx)
 	if err != nil {
+		ObserveInc(RectifyWorkError, d.conf.metricsName, 1)
 		d.conf.logger(ctx).Error("failed to rectify work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 	}
 
@@ -236,12 +242,14 @@ func (d *dividerWorker) newWorkEvent(ctx context.Context, key string) {
 	for _, v := range d.getWorkerNodeKeys() {
 		inRange, err := d.storage.CheckWorkInKeyRange(ctx, v, key)
 		if err != nil {
+			ObserveInc(CheckWorkInKeyRangeError, d.conf.metricsName, 1)
 			d.conf.logger(ctx).Error("failed to check if work is in the range of this worker", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 			return
 		}
 		if inRange {
 			err = d.conf.starter(ctx, key)
 			if err != nil {
+				ObserveInc(StartWorkExternalError, d.conf.metricsName, 1)
 				d.conf.logger(ctx).Error("failed to execute starter", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 				return
 			}
@@ -480,6 +488,8 @@ func (d *dividerWorker) rectifyWork(ctx context.Context) (err error) {
 		defer can()
 		err = d.conf.stopper(ctx2, key)
 		if err != nil {
+			ObserveInc(StopWorkExternalError, d.conf.metricsName, 1)
+
 			d.conf.logger(ctx2).Error("failed to execute stopper, not removing from known work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 			continue
 		}
@@ -492,6 +502,7 @@ func (d *dividerWorker) rectifyWork(ctx context.Context) (err error) {
 		defer can()
 		err = d.conf.starter(ctx2, key)
 		if err != nil {
+			ObserveInc(StartWorkExternalError, d.conf.metricsName, 1)
 			d.conf.logger(ctx2).Error("failed to execute starter, not adding to known work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 			continue
 		}

@@ -5,8 +5,8 @@ SHELL:=/bin/bash
 
 go-test:
 	go test ./...
-	shadow -strict $$(go list ./... | grep -v "api$$")
-	staticcheck $$(go list ./... | grep -v "api$$")
+	go run golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow -strict $$(go list ./... | grep -v "api$$")
+	go run honnef.co/go/tools/cmd/staticcheck@latest $$(go list ./... | grep -v "api$$")
 	golangci-lint run
 	
 newman-tests:

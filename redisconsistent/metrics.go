@@ -73,6 +73,7 @@ var StopProcessingTime = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Help:      "Returns the length of time that stop_processing request took",
 	Buckets:   HistogramBuckets,
 }, []string{"divider"})
+
 var StartProcessingKeyCount = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
@@ -91,6 +92,56 @@ var DividerAssignedItemsGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 	Subsystem: "redis_work_divider",
 	Name:      "assigned_items",
 	Help:      "Returns the number of items assigned to this divider",
+}, []string{"divider"})
+
+// error tracking counters
+var AddWorkToDividerError = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_add_work_to_divider",
+	Help:      "An error was encountered attempting to add work to the stored work that needs to be done.",
+}, []string{"divider"})
+var CheckWorkInKeyRangeError = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_check_work_in_key_range",
+	Help:      "an error was encountered attempting to check against storage if a given work key is in the worker's work coverage ranges.",
+}, []string{"divider"})
+var PublishAddWorkToDividerError = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_publish_add_work_to_divider",
+	Help:      "An error was encountered attempting to publish the work to the new work stream",
+}, []string{"divider"})
+var PublishRemoveWorkFromDividerError = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_remove_work_from_divider",
+	Help:      "An error was encountered attempting to publish the work to the remove work stream",
+}, []string{"divider"})
+var RectifyWorkError = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_rectify_work",
+	Help:      "An error was encountered attempting to rectify the worker's work that needs to be processed/completed.",
+}, []string{"divider"})
+var RemoveWorkFromDividerError = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_remove_work_from_divider",
+	Help:      "An error was encountered attempting to remove work from the stored work that needs to be done in redis",
+}, []string{"divider"})
+var StartWorkExternalError = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_start_work_external",
+	Help:      "an error in the starter callback was encountered attempting to start wokring on one of the desired work",
+}, []string{"divider"})
+var StopWorkExternalError = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_stop_work_external",
+	Help:      "an error in the stopper callback was encountered attempting to stop wokring on one of the desired work",
 }, []string{"divider"})
 
 func ObserveDuration(metric *prometheus.HistogramVec, name string, taken time.Duration) {

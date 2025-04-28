@@ -127,7 +127,7 @@ func main() {
 
 	time.Sleep(time.Millisecond * 100)
 
-	d1.StopProcessing(context.Background(), "0", "1", "8")
+	_ = d1.StopProcessing(context.Background(), "0", "1", "8")
 	time.Sleep(time.Millisecond * 100)
 
 	i, _ = d1.GetWork(context.Background())

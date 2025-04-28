@@ -181,7 +181,8 @@ func (r *workStorageImpl) GetWorkFromKeyToNextWorkerKey(ctx context.Context, key
 
 	//if the scores are properly ordered, return that set of work.
 	if startScore < nextWorkScore {
-		dat, err := r.client.ZRangeByScore(ctx, r.getDataKey(), &redis.ZRangeBy{
+		var dat []string
+		dat, err = r.client.ZRangeByScore(ctx, r.getDataKey(), &redis.ZRangeBy{
 			Min: fmt.Sprintf("%f", startScore),
 			Max: fmt.Sprintf("%f", nextWorkScore),
 		}).Result()
