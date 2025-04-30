@@ -305,21 +305,24 @@ func (d *dividerWorker) masterUpdateRequiredWorkFunc() {
 	//Get all the newWork that needs to be assigned.
 	newWork, err := d.conf.workFetcher(d.ctx)
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("failed to execute work fetcher", err, slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(d.ctx).Error("failed to execute work fetcher", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		ObserveInc(WorkFetcherError, d.conf.metricsName, 1)
 		return
 	}
 
 	//Add the work to the list of work in the system.
 	err = d.storage.AddWorkToDividedWork(d.ctx, newWork)
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("failed to add work to divided work", err, slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(d.ctx).Error("failed to add work to divided work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		ObserveInc(AddWorkToDivideWorkError, d.conf.metricsName, 1)
 		return
 	}
 
 	//get existing work
 	existingWork, err := d.storage.GetAllWork(d.ctx)
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("failed to get list of all work", err, slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(d.ctx).Error("failed to get list of all work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		ObserveInc(GetAllWorkError, d.conf.metricsName, 1)
 		return
 	}
 
@@ -330,14 +333,16 @@ func (d *dividerWorker) masterUpdateRequiredWorkFunc() {
 	//remove all that work
 	err = d.storage.RemoveWorkFromDividedWork(d.ctx, remove)
 	if err != nil {
-		d.conf.logger(d.ctx).Panic("failed to remove the old work", err, slog.String("divider.id", d.conf.instanceID))
+		d.conf.logger(d.ctx).Error("failed to remove the old work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+		ObserveInc(RemoveWorkFromDividerError, d.conf.metricsName, 1)
 		return
 	}
 
 	for _, v := range remove {
 		err = d.removeWork.Publish(d.ctx, v)
 		if err != nil {
-			d.conf.logger(d.ctx).Panic("failed to publish old work removal", err, slog.String("divider.id", d.conf.instanceID))
+			d.conf.logger(d.ctx).Error("failed to publish old work removal", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
+			ObserveInc(RemoveWorkPublishError, d.conf.metricsName, 1)
 		}
 	}
 	//note: Not triggering the add work event as that event should be triggered manually by the add work call, not by this.

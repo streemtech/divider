@@ -95,53 +95,78 @@ var DividerAssignedItemsGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
 }, []string{"divider"})
 
 // error tracking counters
-var AddWorkToDividerError = prometheus.NewCounterVec(prometheus.CounterOpts{
+var AddWorkToDividerError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_add_work_to_divider",
 	Help:      "An error was encountered attempting to add work to the stored work that needs to be done.",
 }, []string{"divider"})
-var CheckWorkInKeyRangeError = prometheus.NewCounterVec(prometheus.CounterOpts{
+var CheckWorkInKeyRangeError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_check_work_in_key_range",
 	Help:      "an error was encountered attempting to check against storage if a given work key is in the worker's work coverage ranges.",
 }, []string{"divider"})
-var PublishAddWorkToDividerError = prometheus.NewCounterVec(prometheus.CounterOpts{
+var PublishAddWorkToDividerError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_publish_add_work_to_divider",
 	Help:      "An error was encountered attempting to publish the work to the new work stream",
 }, []string{"divider"})
-var PublishRemoveWorkFromDividerError = prometheus.NewCounterVec(prometheus.CounterOpts{
+var PublishRemoveWorkFromDividerError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_remove_work_from_divider",
 	Help:      "An error was encountered attempting to publish the work to the remove work stream",
 }, []string{"divider"})
-var RectifyWorkError = prometheus.NewCounterVec(prometheus.CounterOpts{
+var RectifyWorkError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_rectify_work",
 	Help:      "An error was encountered attempting to rectify the worker's work that needs to be processed/completed.",
 }, []string{"divider"})
-var RemoveWorkFromDividerError = prometheus.NewCounterVec(prometheus.CounterOpts{
+var RemoveWorkFromDividerError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_remove_work_from_divider",
 	Help:      "An error was encountered attempting to remove work from the stored work that needs to be done in redis",
 }, []string{"divider"})
-var StartWorkExternalError = prometheus.NewCounterVec(prometheus.CounterOpts{
+var StartWorkExternalError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_start_work_external",
 	Help:      "an error in the starter callback was encountered attempting to start wokring on one of the desired work",
 }, []string{"divider"})
-var StopWorkExternalError = prometheus.NewCounterVec(prometheus.CounterOpts{
+var StopWorkExternalError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_stop_work_external",
 	Help:      "an error in the stopper callback was encountered attempting to stop wokring on one of the desired work",
+}, []string{"divider"})
+
+var WorkFetcherError = promauto.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_external_work_fetcher_callback",
+	Help:      "an error in the master work calculation flow where attempting to call the external callback to calculate work",
+}, []string{"divider"})
+var AddWorkToDivideWorkError = promauto.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_internal_divide_work",
+	Help:      "an error in the master work calculation flow when attempting to divide the work between the appropriate nodes",
+}, []string{"divider"})
+var GetAllWorkError = promauto.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_get_all_existing_work",
+	Help:      "an error in the master work calculation flow when attempting to get all work that needs to be divided",
+}, []string{"divider"})
+var RemoveWorkPublishError = promauto.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "streemtech",
+	Subsystem: "redis_work_divider",
+	Name:      "error_remove_work_publish",
+	Help:      "an error in the master work calculation flow when attempting to publish that work needs to be removed",
 }, []string{"divider"})
 
 func ObserveDuration(metric *prometheus.HistogramVec, name string, taken time.Duration) {
@@ -173,66 +198,38 @@ func ObserveGauge(metric *prometheus.GaugeVec, name string, value int) {
 
 func InitMetrics(name string) {
 
-	var err error
-
-	_, err = NewWorkerEventTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
+	mets := []*prometheus.MetricVec{
+		NewWorkerEventTime.MetricVec,
+		RemoveWorkerEventTime.MetricVec,
+		NewWorkEventTime.MetricVec,
+		RemoveWorkEventTime.MetricVec,
+		MasterUpdateWorkTime.MetricVec,
+		WorkerRectifyTime.MetricVec,
+		WorkerPingTime.MetricVec,
+		StartProcessingTime.MetricVec,
+		StopProcessingTime.MetricVec,
+		StartProcessingKeyCount.MetricVec,
+		StopProcessingKeyCount.MetricVec,
+		DividerAssignedItemsGauge.MetricVec,
+		AddWorkToDividerError.MetricVec,
+		CheckWorkInKeyRangeError.MetricVec,
+		PublishAddWorkToDividerError.MetricVec,
+		PublishRemoveWorkFromDividerError.MetricVec,
+		RectifyWorkError.MetricVec,
+		RemoveWorkFromDividerError.MetricVec,
+		StartWorkExternalError.MetricVec,
+		StopWorkExternalError.MetricVec,
+		WorkFetcherError.MetricVec,
+		AddWorkToDivideWorkError.MetricVec,
+		GetAllWorkError.MetricVec,
+		RemoveWorkPublishError.MetricVec,
 	}
 
-	_, err = RemoveWorkerEventTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = NewWorkEventTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = RemoveWorkEventTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = MasterUpdateWorkTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = WorkerRectifyTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = WorkerPingTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = StartProcessingTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = StopProcessingTime.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = StartProcessingKeyCount.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = StopProcessingKeyCount.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
-	}
-
-	_, err = DividerAssignedItemsGauge.GetMetricWithLabelValues(name)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to get metric"))
+	for _, v := range mets {
+		_, err := v.GetMetricWithLabelValues(name)
+		if err != nil {
+			panic(errors.Wrap(err, "failed to get metric"))
+		}
 	}
 
 }
