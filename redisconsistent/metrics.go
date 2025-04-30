@@ -125,10 +125,10 @@ var RectifyWorkError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name:      "error_rectify_work",
 	Help:      "An error was encountered attempting to rectify the worker's work that needs to be processed/completed.",
 }, []string{"divider"})
-var RemoveWorkFromDividerError = promauto.NewCounterVec(prometheus.CounterOpts{
+var RemoveWorkFromDividerStorageError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
-	Name:      "error_remove_work_from_divider",
+	Name:      "error_remove_work_from_divider_storage",
 	Help:      "An error was encountered attempting to remove work from the stored work that needs to be done in redis",
 }, []string{"divider"})
 var StartWorkExternalError = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -216,7 +216,7 @@ func InitMetrics(name string) {
 		PublishAddWorkToDividerError.MetricVec,
 		PublishRemoveWorkFromDividerError.MetricVec,
 		RectifyWorkError.MetricVec,
-		RemoveWorkFromDividerError.MetricVec,
+		RemoveWorkFromDividerStorageError.MetricVec,
 		StartWorkExternalError.MetricVec,
 		StopWorkExternalError.MetricVec,
 		WorkFetcherError.MetricVec,

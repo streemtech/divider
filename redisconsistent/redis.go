@@ -142,7 +142,7 @@ func (d *dividerWorker) StopProcessing(ctx context.Context, works ...string) err
 	start := time.Now()
 	err := d.storage.RemoveWorkFromDividedWork(ctx, works)
 	if err != nil {
-		ObserveInc(RemoveWorkFromDividerError, d.conf.metricsName, 1)
+		ObserveInc(RemoveWorkFromDividerStorageError, d.conf.metricsName, 1)
 		return errors.Wrap(err, "failed to Remove Work From Divided Work")
 	}
 	for _, work := range works {
@@ -334,7 +334,7 @@ func (d *dividerWorker) masterUpdateRequiredWorkFunc() {
 	err = d.storage.RemoveWorkFromDividedWork(d.ctx, remove)
 	if err != nil {
 		d.conf.logger(d.ctx).Error("failed to remove the old work", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
-		ObserveInc(RemoveWorkFromDividerError, d.conf.metricsName, 1)
+		ObserveInc(RemoveWorkFromDividerStorageError, d.conf.metricsName, 1)
 		return
 	}
 
