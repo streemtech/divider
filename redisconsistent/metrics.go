@@ -135,13 +135,13 @@ var StartWorkExternalError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_start_work_external",
-	Help:      "an error in the starter callback was encountered attempting to start wokring on one of the desired work",
+	Help:      "an error in the starter callback was encountered attempting to start working on one of the desired work",
 }, []string{"divider"})
 var StopWorkExternalError = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "streemtech",
 	Subsystem: "redis_work_divider",
 	Name:      "error_stop_work_external",
-	Help:      "an error in the stopper callback was encountered attempting to stop wokring on one of the desired work",
+	Help:      "an error in the stopper callback was encountered attempting to stop working on one of the desired work",
 }, []string{"divider"})
 
 var WorkFetcherError = promauto.NewCounterVec(prometheus.CounterOpts{

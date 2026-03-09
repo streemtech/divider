@@ -131,6 +131,17 @@ func (d *dividerWorker) StopWorker(ctx context.Context) {
 		d.conf.logger(ctx).Error("failed to publish removing of workers from work list", slog.String("err.error", err.Error()), slog.String("divider.id", d.conf.instanceID))
 	}
 
+	//sleep for delayed network shenanigans.
+	time.Sleep(time.Millisecond * 100)
+
+	//TODO4 listen for work accepted notifications before resetting work?
+	for work := range d.knownWork.Iterator() {
+		err = d.newWork.Publish(ctx, work)
+		if err != nil {
+			d.conf.logger(ctx).Error("failed to publish work to new work list for reprocessing", slog.String("err.error", err.Error()))
+		}
+	}
+
 	//reset known work here as well so that I cant accidentally pull the old work from the iterator.
 	d.knownWork = set.New[string]()
 	ObserveGauge(DividerAssignedItemsGauge, d.conf.metricsName, d.knownWork.Len())
